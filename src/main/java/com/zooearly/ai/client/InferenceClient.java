@@ -12,7 +12,8 @@ import org.springframework.web.client.RestClientResponseException;
 
 /**
  * FastAPI 추론 서버 호출 전담. 타임아웃은 명세 §0.4.
- * - 기본 클라이언트: connect 3s / read 15s  (tts, feedback, 문장 목록)
+ * - 기본 클라이언트: connect 3s / read 15s  (tts, 문장 목록)
+ * - feedback 클라이언트: connect 3s / read 30s (OpenAI 를 두 번 직렬로 부른다)
  * - stt  클라이언트: connect 3s / read 45s (콜드 스타트 실측 43초)
  * - pron 클라이언트: connect 3s / read 65s (채점 서비스 콜드 스타트 + FastAPI 재시도)
  * - chat 클라이언트: connect 3s / read 30s  (STT+LLM+TTS 3단이라 길다)
@@ -32,6 +33,7 @@ public class InferenceClient {
     private final RestClient chatClient;
     private final RestClient sttClient;
     private final RestClient pronClient;
+    private final RestClient feedbackClient;
     private final RestClient storyClient;
 
     public InferenceClient(
@@ -40,6 +42,7 @@ public class InferenceClient {
             @Value("${inference.timeout.connect-seconds}") long connectSeconds,
             @Value("${inference.timeout.read-seconds}") long readSeconds,
             @Value("${inference.timeout.chat-read-seconds}") long chatReadSeconds,
+            @Value("${inference.timeout.feedback-read-seconds}") long feedbackReadSeconds,
             @Value("${inference.timeout.stt-read-seconds}") long sttReadSeconds,
             @Value("${inference.timeout.pronunciation-read-seconds}") long pronReadSeconds,
             @Value("${inference.timeout.story-read-seconds}") long storyReadSeconds) {
@@ -47,6 +50,7 @@ public class InferenceClient {
         this.chatClient = build(baseUrl, apiKey, connectSeconds, chatReadSeconds);
         this.sttClient = build(baseUrl, apiKey, connectSeconds, sttReadSeconds);
         this.pronClient = build(baseUrl, apiKey, connectSeconds, pronReadSeconds);
+        this.feedbackClient = build(baseUrl, apiKey, connectSeconds, feedbackReadSeconds);
         this.storyClient = build(baseUrl, apiKey, connectSeconds, storyReadSeconds);
     }
 
@@ -64,6 +68,17 @@ public class InferenceClient {
     /** tts, feedback — JSON body 그대로 전달 */
     public String postJson(String path, String rawJsonBody) {
         return exchange(defaultClient, path, MediaType.APPLICATION_JSON, rawJsonBody);
+    }
+
+    /**
+     * feedback — JSON body 그대로 전달, 30s 타임아웃.
+     *
+     * 공용 15초로는 모자란다. 이 엔드포인트는 FastAPI 안에서 OpenAI 를 **두 번
+     * 직렬로** 부른다 — 교정 문장을 만들고, 그 결과를 모국어로 번역한다. 한 번이
+     * 5~8초로 늘어나면 두 번째가 시작도 못 하고 잘린다(배포 직후 실측에서 504).
+     */
+    public String postJsonFeedback(String path, String rawJsonBody) {
+        return exchange(feedbackClient, path, MediaType.APPLICATION_JSON, rawJsonBody);
     }
 
     /** pronunciation/sentences — 문장 목록 조회. body 없음 */

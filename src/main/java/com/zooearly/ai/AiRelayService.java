@@ -165,7 +165,7 @@ public class AiRelayService {
             throw new BusinessException(ErrorCode.INVALID_PARAMETER, "nickname");
         }
         validateNickname(nickname.asText());
-        return inferenceClient.postJson(feedbackPath, rawBody);
+        return inferenceClient.postJsonFeedback(feedbackPath, rawBody);
     }
 
     // ── pronunciation ─────────────────────────────────────

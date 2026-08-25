@@ -72,7 +72,7 @@ inference:
     story: ${INFERENCE_PATH_STORY:/internal/v1/story/generate}
   timeout:
     connect-seconds: 3         # 명세 §0.4
-    read-seconds: 15           # tts / feedback / 문장 목록
+    read-seconds: 15           # tts / 문장 목록
 
     # STT만 따로 뺀 이유 — 실측 때문이다 (2026-08-25 재측정).
     #   예열된 상태: 1초 음성 6.7초 / 3초 8.3초 / 5초 8.3초
@@ -96,6 +96,12 @@ inference:
     # 평소에는 여기까지 오지 않는다 — FastAPI가 문장 목록을 줄 때 채점 서비스를 미리 깨워둬서
     # 아이가 녹음할 때쯤이면 이미 예열돼 있고, 그때 채점은 1초 안에 끝난다.
     pronunciation-read-seconds: ${INFERENCE_TIMEOUT_PRONUNCIATION:65}
+
+    # 표현 교정은 15초 안에 OpenAI를 **두 번 직렬로** 부른다 —
+    # 교정 문장을 먼저 만들고, 그 결과를 모국어로 번역한다.
+    # 한 번이 5~8초로 늘어나면 두 번째가 시작도 못 하고 잘려서, 배포 직후 실측에서
+    # 504가 났다. 두 번 몫으로 잡는다.
+    feedback-read-seconds: ${INFERENCE_TIMEOUT_FEEDBACK:30}
 
     chat-read-seconds: 30      # chat (STT+LLM+TTS 3단)
 

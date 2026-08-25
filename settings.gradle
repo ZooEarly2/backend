@@ -1,0 +1,13 @@
+/**
+ * Java 17 툴체인 자동 확보 — build.gradle이 요구하는 JDK 17이 없는 개발 PC에서도
+ * `./gradlew build`가 그대로 돈다. CI(actions/setup-java 17)와 Dockerfile(gradle:8.10-jdk17)은
+ * 이미 17을 갖고 있으므로 아무것도 내려받지 않는다.
+ *
+ * 이걸 두지 않으면 JDK 21만 깔린 PC에서 "Cannot find a Java installation ... languageVersion=17"로
+ * 빌드가 죽는다. toolchain을 21로 올려 해결하면 CI·Docker와 어긋나므로 그 길은 택하지 않았다.
+ */
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.8.0'
+}
+
+rootProject.name = 'zooearly-gateway'

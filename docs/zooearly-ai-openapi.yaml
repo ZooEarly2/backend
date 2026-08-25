@@ -1,0 +1,759 @@
+openapi: 3.0.3
+
+info:
+  title: ZooEarly AI API
+  version: 1.7.0
+  description: |
+    쥬얼리 (ZooEarly) — AI API 명세서 (v1.0 · 2026-08-21)
+
+    React Native 앱 ↔ API Gateway ↔ FastAPI Inference Server(STT / LLM / TTS → OpenAI API)
+
+    - 게이트웨이는 릴레이 전용: 요청 검증 + 전달 + 에러 통일만 한다. DB 없음, 무상태.
+    - 상태(대화 이력, 목표 문장, 시나리오)는 전부 앱이 갖고 있으며 매 요청에 실어 보낸다.
+    - FastAPI 내부 경로는 접두사만 다르다: `/api/v1/ai/chat` → `/ai/chat`
+    - 어떤 에러도 아이 화면에 "오류"로 표시하지 않는다. 전부 "괜찮아, 다시 해볼까?"로 폴백한다.
+
+servers:
+  # ★ 아래 주소에 /api/v1 이 포함돼 있다. paths 는 그 뒤에 붙는 부분만 적은 것이다.
+  #   예) /ai/story  ->  https://<호스트>/api/v1/ai/story
+  #
+  #   앱의 base URL 을 /api/v1 없이 호스트까지만 넣으면 전부 404다.
+  #   실제로 그 사고가 있었다(2026-08-25) — paths 의 /ai/... 만 보고
+  #   base URL 을 호스트로만 설정해서 모든 호출이 404·CORS 에러로 보였다.
+  - url: https://zooearly-gateway.politesmoke-47da854d.japaneast.azurecontainerapps.io/api/v1
+    description: 배포된 게이트웨이 (Azure Container Apps, japaneast)
+  - url: http://localhost:8080/api/v1
+    description: 로컬 개발 (gradlew bootRun)
+
+tags:
+  - name: AI
+    description: STT / LLM / TTS 추론 릴레이
+
+paths:
+  /ai/chat:
+    post:
+      tags: [AI]
+      operationId: chat
+      summary: 음성 대화 (STT → LLM → TTS 통합 파이프라인)
+      description: |
+        아이의 음성을 올리면 서버가 STT → LLM → TTS를 한 번에 처리하고
+        텍스트와 음성(base64 mp3)을 함께 돌려준다. 왕복 1회로 지연 최소화.
+
+        **설계 계약**
+        - STT가 못 알아들어도 `200`이다. `userText: null` + 되묻기 `aiText`가 온다.
+        - 응답을 받은 앱은 `history`에 user/assistant 두 턴을 추가한다 (`userText`가 null이면 user 턴 생략).
+        - 오디오 원본은 저장하지 않는다. 응답 헤더 `X-Audio-Retention: none`.
+        - `aiText`는 한국어교육과정 1~2급 어휘로 생성된다 (FastAPI 프롬프트 담당).
+        - 타임아웃: Gateway → FastAPI 30초 (3단 파이프라인이라 다른 엔드포인트보다 길다).
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [audio, scenario, history, nickname]
+              properties:
+                audio:
+                  type: string
+                  format: binary
+                  description: 아이의 발화. m4a/wav/webm, 최대 10MB · 30초
+                scenario:
+                  $ref: '#/components/schemas/Scenario'
+                history:
+                  type: string
+                  description: |
+                    지금까지의 대화를 담은 JSON 문자열. 없으면 `"[]"`.
+                    최근 10턴까지만 보낸다 (앱이 자른다).
+                    형식: `[{"role":"user"|"assistant","content":"..."}]`
+                  example: '[{"role":"assistant","content":"불고기 많이 줄까?"}]'
+                nativeLanguage:
+                  $ref: '#/components/schemas/NativeLanguage'
+                nickname:
+                  type: string
+                  maxLength: 20
+                  description: 아이 호칭. 앱 온보딩에서 받은 값. 서버는 저장하지 않는다
+                  example: "민수"
+      responses:
+        '200':
+          description: 대화 성공 (STT 인식 실패 포함 — userText가 null일 뿐 에러가 아니다)
+          headers:
+            X-Audio-Retention:
+              schema: { type: string, enum: [none] }
+              description: 오디오 원본 미저장 보증
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ChatResult'
+              example:
+                success: true
+                data:
+                  userText: "네, 많이 주세요."
+                  aiText: "그래, 많이 줄게! 맛있게 먹어."
+                  audio: { data: "SUQzBAAA...", format: "mp3" }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422': { $ref: '#/components/responses/SttFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '502': { $ref: '#/components/responses/AiServerError' }
+        '504': { $ref: '#/components/responses/AiTimeout' }
+
+  /ai/stt:
+    post:
+      tags: [AI]
+      operationId: stt
+      summary: 음성 → 텍스트
+      description: |
+        음성만 텍스트로 바꾼다. SPEAK/SHADOW 스텝처럼 LLM 응답이 필요 없는 화면에서 쓴다.
+        인식 결과와 목표 문장의 매칭 판정은 앱 로컬에서 한다.
+
+        **인식 실패는 에러가 아니다** — `text: null`로 `200`이 내려간다.
+        `422 STT_FAILED`는 STT 엔진 자체가 죽었을 때만 쓴다.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [audio]
+              properties:
+                audio:
+                  type: string
+                  format: binary
+                  description: m4a/wav/webm, 최대 10MB · 30초
+                language:
+                  type: string
+                  default: ko-KR
+                  description: BCP-47 언어 코드
+      responses:
+        '200':
+          description: 변환 성공 (인식 실패 포함)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/SttResult'
+              example:
+                success: true
+                data: { text: "많이 주세요", confidence: 0.94 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422': { $ref: '#/components/responses/SttFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '502': { $ref: '#/components/responses/AiServerError' }
+        '504': { $ref: '#/components/responses/AiTimeout' }
+
+  /ai/tts:
+    post:
+      tags: [AI]
+      operationId: tts
+      summary: 텍스트 → 음성
+      description: |
+        텍스트를 음성(base64 mp3)으로 바꾼다. DIALOGUE 🔊 버튼, LISTEN 스텝에서 쓴다.
+
+        - `voice`는 OpenAI 보이스 ID가 아니라 역할 enum이다. 실제 보이스 매핑은 FastAPI 설정에 둔다.
+        - 같은 문장의 TTS 결과는 앱이 로컬 캐시한다 — 매번 서버에 묻지 않는다.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text, language]
+              properties:
+                text:
+                  type: string
+                  maxLength: 200
+                  description: 읽을 문장
+                  example: "불고기 많이 줄까?"
+                voice:
+                  type: string
+                  enum: [TEACHER, FRIEND]
+                  default: TEACHER
+                  description: 역할 enum. 실제 보이스 매핑은 FastAPI 담당
+                speed:
+                  type: number
+                  minimum: 0.5
+                  maximum: 1.5
+                  default: 0.9
+                  description: 재생 속도. 아동용 기본 느리게
+                language:
+                  allOf:
+                    - $ref: '#/components/schemas/NativeLanguage'
+                  description: |
+                    읽을 문장의 언어. 필수.
+                    한국어 문장을 읽을 때도 KOREAN을 명시한다. 같은 엔드포인트로
+                    여러 언어가 나가므로 추측의 여지를 두지 않는다.
+                    주의: /ai/stt의 language는 BCP-47 문자열이고 이쪽은 enum이다.
+      responses:
+        '200':
+          description: 합성 성공
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [audio]
+                        properties:
+                          audio:
+                            $ref: '#/components/schemas/AudioPayload'
+              example:
+                success: true
+                data:
+                  audio: { data: "SUQzBAAA...", format: "mp3" }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '502': { $ref: '#/components/responses/AiServerError' }
+        '504': { $ref: '#/components/responses/AiTimeout' }
+
+  /ai/feedback:
+    post:
+      tags: [AI]
+      operationId: feedback
+      summary: 발화 피드백 생성
+      description: |
+        아이의 발화(STT 결과 텍스트)와 목표 문장을 주면 FEEDBACK 스텝에 그릴 피드백 객체를 생성한다.
+        음성이 아니라 텍스트를 받는다 — STT는 `/ai/stt`에서 이미 끝났다.
+
+        **설계 계약**
+        - `recognizedText: null`도 유효한 요청이다 → 격려 피드백 생성 (`understood/matched: false`).
+        - `title`에 "틀렸어요"류 문구 금지.
+        - `matched` 판정 활용(별점 등)은 앱 로컬 책임. 서버는 판정 재료만 준다.
+        - 발화 기록은 서버에 남지 않는다.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetSentence, recognizedText, nickname]
+              properties:
+                targetSentence:
+                  type: string
+                  description: 목표 문장 (앱 번들의 스텝 데이터)
+                  example: "많이 주세요."
+                recognizedText:
+                  type: string
+                  nullable: true
+                  description: STT 결과. 인식 실패면 null
+                  example: "많이 주세여"
+                scenario:
+                  $ref: '#/components/schemas/Scenario'
+                nativeLanguage:
+                  $ref: '#/components/schemas/NativeLanguage'
+                nickname:
+                  type: string
+                  maxLength: 20
+                  description: 아이 호칭. 앱 온보딩에서 받은 값. 서버는 저장하지 않는다
+                  example: "민수"
+      responses:
+        '200':
+          description: 피드백 생성 성공
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/FeedbackResult'
+              example:
+                success: true
+                data:
+                  understood: true
+                  matched: true
+                  similarity: 0.92
+                  title: "잘했어요!"
+                  body: "무슨 뜻인지 잘 이해했어요."
+                  naturalSentence: "많이 주세요."
+                  naturalHint: "'주세여'보다 '주세요'가 좋아요."
+                  highlightWords: ["주세요"]
+                  translation: "Cho mình nhiều nhé."
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '502': { $ref: '#/components/responses/AiServerError' }
+        '504': { $ref: '#/components/responses/AiTimeout' }
+
+  /ai/pronunciation:
+    post:
+      tags: [AI]
+      operationId: pronunciation
+      summary: 발음 채점
+      description: |
+        따라 말한 녹음의 발음을 채점한다. 발음 피드백 화면(빈칸 퀴즈)에서 쓴다.
+
+        - `/ai/feedback`과 다르다. 저쪽은 "어떤 단어를 골랐나"를 텍스트로 보고,
+          이쪽은 "어떻게 소리 냈나"를 오디오로 본다. 그래서 STT를 거치지 않는다.
+        - `sentenceId`는 자유 텍스트가 아니다. `GET /ai/pronunciation/sentences`가
+          내려준 10개 중 하나를 그대로 돌려보내야 한다. FastAPI가 자기 목록에서
+          채점 기준 문장을 직접 찾기 때문이다 (2026-08-24 FastAPI 명세 변경).
+        - 점수는 0~1이 아니라 z점수다. 또래 규준 대비 상대값이라 음수가 정상이며,
+          화면에 숫자를 표시하지 않는다.
+        - **잘함/못함 판정은 FastAPI가 한다.** `targetWord`가 `null`이면 발음이
+          전부 기준(z ≥ -1.5) 이상이라는 뜻이다 — 퀴즈 화면 없이 바로 칭찬 화면으로 간다.
+        - 빈칸은 `targetWord` 하나뿐이다. 화면의 빈칸 문장은 앱이 `sentence`와
+          `targetIndex`로 직접 만든다 — 서버는 만들어주지 않는다.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [audio, sentenceId]
+              properties:
+                audio:
+                  type: string
+                  format: binary
+                  description: 따라 말한 녹음. m4a/wav/webm, 최대 10MB · 30초
+                sentenceId:
+                  type: string
+                  description: |
+                    `GET /ai/pronunciation/sentences`에서 받은 값 중 하나.
+                    앱이 직접 만들지 않는다 — 서버 목록에 없는 값은 422가 난다.
+                  example: "arrival_2"
+      responses:
+        '200':
+          description: 채점 완료
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          sentenceId:
+                            type: string
+                            description: 요청에 실은 값을 그대로 돌려준다
+                          sentence:
+                            type: string
+                            description: 채점 대상 문장
+                          targetWord:
+                            type: string
+                            nullable: true
+                            description: |
+                              가장 약하게 발음한 어절. 빈칸으로 만들 대상.
+                              null이면 전부 기준 이상이라는 뜻 — 퀴즈 화면 없이
+                              바로 칭찬 화면으로 간다.
+                            example: "지내자"
+                          targetIndex:
+                            type: integer
+                            nullable: true
+                            description: 그 어절이 몇 번째인가 (0부터)
+                          targetZ:
+                            type: number
+                            nullable: true
+                            description: 그 어절의 z점수. 낮을수록 약하다
+                          words:
+                            type: array
+                            description: 어절별 채점 결과
+                            items:
+                              type: object
+                              properties:
+                                word: { type: string }
+                                z: { type: number, nullable: true }
+                                warn: { type: boolean, description: 주의 임계값 미만인가 }
+                                worstPhone: { type: string, nullable: true }
+              example:
+                success: true
+                data:
+                  sentenceId: "arrival_2"
+                  sentence: "안녕! 우리 친하게 지내자"
+                  targetWord: "지내자"
+                  targetIndex: 2
+                  targetZ: -1.82
+                  words:
+                    - { word: "안녕!", z: 0.31, warn: false, worstPhone: null }
+                    - { word: "우리", z: -0.42, warn: false, worstPhone: null }
+                    - { word: "친하게", z: -1.12, warn: false, worstPhone: null }
+                    - { word: "지내자", z: -1.82, warn: true, worstPhone: "ㄴ" }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422': { $ref: '#/components/responses/SttFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '502': { $ref: '#/components/responses/AiServerError' }
+        '504': { $ref: '#/components/responses/AiTimeout' }
+
+  /ai/pronunciation/sentences:
+    get:
+      tags: [AI]
+      operationId: pronunciationSentences
+      summary: 발음 연습 문장 목록
+      description: |
+        발음 연습용 문장 10개(등교·급식·하교 3개씩 + 수업시간 시 1개)를 돌려준다.
+        "표현 고르기" 화면의 선택지 3개, 수업시간 "같이 읽어볼까요?"의 시 구절이
+        모두 여기서 온다 — 앱 번들 데이터가 아니다
+        (2026-08-24부터. 이전에는 시나리오별로 앱에 하드코딩돼 있었다).
+
+        `category`로 필터링해서 현재 시나리오에 맞는 항목만 보여준다.
+        고른 문장의 `sentenceId`를 `POST /ai/pronunciation`에 그대로 실어 보낸다.
+      responses:
+        '200':
+          description: 조회 성공
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            sentenceId:
+                              type: string
+                              description: 발음 채점 요청에 그대로 실어 보내는 값
+                            category:
+                              type: string
+                              enum: [arrival, study, lunch, departure]
+                              description: |
+                                등교/수업시간/급식/하교 구분. 소문자이고 §1.5의 Scenario enum
+                                (ARRIVAL/CLASS/LUNCH/DISMISSAL, 대문자)과 표기가 다르다 —
+                                이 API 전용 값이니 섞어 쓰지 않는다. study는 1개뿐이다(시 전체가
+                                한 항목에 이어져 있다) — 나머지 3개 카테고리는 3개씩이다.
+                            text:
+                              type: string
+                              description: 화면에 보여줄 문장 원문
+              example:
+                success: true
+                data:
+                  - { sentenceId: "arrival_1", category: "arrival", text: "안녕 나도 만나서 반가워 !" }
+                  - { sentenceId: "arrival_2", category: "arrival", text: "안녕! 우리 친하게 지내자" }
+                  - { sentenceId: "arrival_3", category: "arrival", text: "안녕 잘 부탁해 !" }
+                  - { sentenceId: "study_1", category: "study", text: "노란 꽃이 피었어요. 예쁜 꽃이 피었어요. 바람이 살랑살랑 꽃이 웃어요." }
+                  - { sentenceId: "lunch_1", category: "lunch", text: "조금만 주세요." }
+                  - { sentenceId: "lunch_2", category: "lunch", text: "적당히 주세요." }
+                  - { sentenceId: "lunch_3", category: "lunch", text: "많이 주세요." }
+                  - { sentenceId: "departure_1", category: "departure", text: "안녕히 가세요!" }
+                  - { sentenceId: "departure_2", category: "departure", text: "네, 안녕히 가세요." }
+                  - { sentenceId: "departure_3", category: "departure", text: "안녕히 계세요 !" }
+        '502': { $ref: '#/components/responses/AiServerError' }
+        '504': { $ref: '#/components/responses/AiTimeout' }
+
+  /ai/story:
+    post:
+      tags: [AI]
+      operationId: story
+      summary: 동화 생성
+      description: |
+        하루치 플레이 기록 4장면을 받아 LLM이 동화로 엮어 돌려준다.
+
+        다른 엔드포인트와 달리 "방금 한 행동"이 아니라 **"오늘 한 일 전부"** 를 한 번에 보낸다.
+        그 기록을 모아두는 것은 **앱의 몫**이다 — 서버는 아무것도 저장하지 않는다(무상태).
+
+        **타임아웃이 60초다.** 4장면을 한 번에 생성하기 때문이며 다른 엔드포인트(15초)보다
+        훨씬 길다. 앱은 반드시 로딩 화면을 띄운다.
+
+        `category` 값이 `/ai/pronunciation/sentences`와 다르다는 점에 주의한다 —
+        저쪽은 arrival/study/lunch/departure, 여기는 school_arrival/class/lunch/school_departure다.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [childName, scenes]
+              properties:
+                childName:
+                  type: string
+                  minLength: 1
+                  maxLength: 20
+                  description: 아이 이름. 내레이션에 그대로 쓰인다
+                scenes:
+                  type: array
+                  minItems: 4
+                  maxItems: 4
+                  description: |
+                    정확히 4개. 순서 고정 — school_arrival → class → lunch → school_departure.
+                    위치와 category 값이 일치해야 한다. 어긋나면 400이다.
+                  items:
+                    type: object
+                    required: [category]
+                    properties:
+                      category:
+                        type: string
+                        enum: [school_arrival, class, lunch, school_departure]
+                      partnerLine:
+                        type: string
+                        description: |
+                          상대방이 아이에게 한 말. 대화 장면(school_arrival/lunch/school_departure)에서는 필수다.
+                          없으면 LLM이 없는 대사를 지어내야 하므로 400으로 끊는다.
+                      childSaid:
+                        type: string
+                        nullable: true
+                        description: 아이가 고른 문장. 안 골랐으면 null
+                      poemText:
+                        type: string
+                        description: 아이가 읽은 동시 전문. class 장면에서는 필수다
+                      practicedWord:
+                        type: string
+                        nullable: true
+                        description: 발음이 약해 연습한 낱말(/ai/pronunciation의 targetWord)
+            example:
+              childName: "지우"
+              scenes:
+                - { category: "school_arrival", partnerLine: "안녕! 오늘도 만나서 반가워", childSaid: "안녕! 나도 만나서 반가워 !" }
+                - { category: "class", poemText: "노란 꽃이 피었어요. 바람이 살랑살랑 꽃이 웃어요.", practicedWord: "살랑살랑" }
+                - { category: "lunch", partnerLine: "오늘 반찬 맛있게 먹어요", childSaid: null }
+                - { category: "school_departure", partnerLine: "오늘도 수고했어, 내일 봐", childSaid: "선생님, 안녕히 가세요!" }
+      responses:
+        '200':
+          description: 생성 성공
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [title, scenes]
+                        properties:
+                          title:
+                            type: string
+                            description: 동화 제목
+                          scenes:
+                            type: array
+                            description: 요청과 같은 개수·순서·카테고리
+                            items:
+                              type: object
+                              properties:
+                                category:
+                                  type: string
+                                  enum: [school_arrival, class, lunch, school_departure]
+                                subtitle:
+                                  type: string
+                                  description: 장면 소제목
+                                opening:
+                                  type: string
+                                  description: 장면을 여는 전환구
+                                quote:
+                                  type: string
+                                  nullable: true
+                                  description: 아이가 한 말 인용. 없으면 null
+                                narration:
+                                  type: string
+                                  description: 동화 문장 2~3문장
+              example:
+                success: true
+                data:
+                  title: "오늘의 학교 동화"
+                  scenes:
+                    - category: "school_arrival"
+                      subtitle: "첫 만남의 아침"
+                      opening: "교문 앞이었어요"
+                      quote: "안녕! 나도 반가워"
+                      narration: "지우가 교문 앞에 서 있었어요. 친구가 밝게 인사했지요."
+                    - category: "class"
+                      subtitle: "시를 읽은 시간"
+                      opening: "교실 문을 열자"
+                      quote: null
+                      narration: "지우가 조용히 교실에 들어갔어요. 노란 꽃 이야기를 읽었답니다."
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '502': { $ref: '#/components/responses/AiServerError' }
+        '504': { $ref: '#/components/responses/AiTimeout' }
+
+components:
+  schemas:
+    Scenario:
+      type: string
+      enum: [ARRIVAL, CLASS, LUNCH, DISMISSAL]
+      description: LLM 프롬프트 컨텍스트용 힌트. 앱 로컬의 시나리오 코드와 동일
+      example: LUNCH
+
+    NativeLanguage:
+      type: string
+      enum: [KOREAN, CHINESE, VIETNAMESE]
+      default: KOREAN
+      description: 피드백·번역 생성 언어. KOREAN이면 번역 생략
+      example: VIETNAMESE
+
+    AudioPayload:
+      type: object
+      required: [data, format]
+      description: 서버 → 앱 오디오. chat과 tts가 동일 구조를 쓴다 — 앱의 재생 코드는 하나면 된다
+      properties:
+        data:
+          type: string
+          format: byte
+          description: base64 인코딩된 mp3 바이너리
+        format:
+          type: string
+          enum: [mp3]
+
+    ChatResult:
+      type: object
+      required: [aiText, audio]
+      properties:
+        userText:
+          type: string
+          nullable: true
+          description: STT 결과. 못 알아들으면 null (에러 아님)
+        aiText:
+          type: string
+          description: LLM이 생성한 응답 문장 (한국어교육과정 1~2급 어휘)
+        audio:
+          $ref: '#/components/schemas/AudioPayload'
+
+    SttResult:
+      type: object
+      required: [text, confidence]
+      properties:
+        text:
+          type: string
+          nullable: true
+          description: 인식 결과. 못 알아들으면 null (에러 아님)
+        confidence:
+          type: number
+          nullable: true
+          minimum: 0
+          maximum: 1
+          description: 엔진이 안 주면 null. 화면 표시 금지
+
+    FeedbackResult:
+      type: object
+      required: [understood, matched, similarity, title, highlightWords]
+      properties:
+        understood:
+          type: boolean
+          description: 의미가 통했는가 (아이콘 결정)
+        matched:
+          type: boolean
+          description: 목표 문장과 통했는가 (별점 판정용)
+        similarity:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: 화면 표시 금지. 내부 판정용
+        title:
+          type: string
+          description: 배너 제목. "틀렸어요"류 문구 금지
+        body:
+          type: string
+          nullable: true
+          description: 배너 본문
+        naturalSentence:
+          type: string
+          nullable: true
+          description: 더 자연스러운 표현
+        naturalHint:
+          type: string
+          nullable: true
+          description: 설명문. 불필요하면 null
+        highlightWords:
+          type: array
+          items: { type: string }
+          description: 밑줄 칠 어절. 없으면 []
+        translation:
+          type: string
+          nullable: true
+          description: naturalSentence의 모국어 번역. KOREAN이면 null
+
+    SuccessEnvelope:
+      type: object
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          type: object
+
+    ErrorEnvelope:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_PARAMETER
+                - UNSUPPORTED_AUDIO_FORMAT
+                - AUDIO_TOO_LARGE
+                - PAYLOAD_TOO_LARGE
+                - STT_FAILED
+                - RATE_LIMITED
+                - AI_SERVER_ERROR
+                - AI_TIMEOUT
+                - INTERNAL_ERROR
+            message:
+              type: string
+              description: 개발자용. 아이 화면에 띄우지 않는다
+            field:
+              type: string
+              nullable: true
+              description: 문제가 된 파라미터명. 검증 에러에만 채워진다
+
+  responses:
+    BadRequest:
+      description: "검증 실패 (Gateway) — INVALID_PARAMETER / UNSUPPORTED_AUDIO_FORMAT / AUDIO_TOO_LARGE"
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          example:
+            success: false
+            error: { code: INVALID_PARAMETER, message: "audio 필드가 없습니다.", field: audio }
+    PayloadTooLarge:
+      description: "요청 전체 용량 초과 (Gateway) — PAYLOAD_TOO_LARGE"
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          example:
+            success: false
+            error: { code: PAYLOAD_TOO_LARGE, message: "요청이 너무 큽니다.", field: null }
+    SttFailed:
+      description: "STT 엔진 자체 실패 (FastAPI) — 인식 실패(null 반환)와 다르다"
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          example:
+            success: false
+            error: { code: STT_FAILED, message: "STT 엔진 오류.", field: null }
+    RateLimited:
+      description: "OpenAI API 쿼터 초과 (FastAPI) — RATE_LIMITED"
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          example:
+            success: false
+            error: { code: RATE_LIMITED, message: "요청이 너무 많습니다.", field: null }
+    AiServerError:
+      description: "FastAPI 5xx 또는 연결 불가 (Gateway 변환) — AI_SERVER_ERROR"
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          example:
+            success: false
+            error: { code: AI_SERVER_ERROR, message: "추론 서버가 응답하지 않습니다.", field: null }
+    AiTimeout:
+      description: "타임아웃 초과 (Gateway) — chat 30s, 나머지 15s"
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          example:
+            success: false
+            error: { code: AI_TIMEOUT, message: "추론 시간이 초과되었습니다.", field: null }

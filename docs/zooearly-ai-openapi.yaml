@@ -2,7 +2,7 @@ openapi: 3.0.3
 
 info:
   title: ZooEarly AI API
-  version: 2.0.0
+  version: 2.1.0
   description: |
     쥬얼리 (ZooEarly) — AI API 명세서 (v1.0 · 2026-08-21)
 
@@ -397,7 +397,7 @@ paths:
                     - { word: "지내자", z: -1.82, warn: true, worstPhone: "ㄴ" }
         '400': { $ref: '#/components/responses/BadRequest' }
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
-        '422': { $ref: '#/components/responses/SttFailed' }
+        '422': { $ref: '#/components/responses/OffScript' }
         '429': { $ref: '#/components/responses/RateLimited' }
         '502': { $ref: '#/components/responses/AiServerError' }
         '504': { $ref: '#/components/responses/AiTimeout' }
@@ -444,10 +444,35 @@ paths:
                             text:
                               type: string
                               description: 화면에 보여줄 문장 원문
+                            translations:
+                              type: object
+                              additionalProperties:
+                                type: string
+                              description: |
+                                (v2.1.0 신설) 이 문장의 모국어 뜻. 키는 언어 코드
+                                (vi=베트남어, zh=중국어), 값은 번역문이다. 한국어는 키가
+                                없다 — 원문이 곧 그것이다.
+
+                                앱의 힌트 전구(💡)가 이 값만 본다. 번역을 따로 부르는
+                                요청은 없다 — 문장이 10개로 고정이라 목록에 함께 담는
+                                편이 맞다. 누를 때마다 부르면 아이가 전구를 누르고 몇 초를
+                                기다려야 하고, 그 사이 자기가 무엇을 물었는지를 잊는다.
+
+                                비어 있을 수 있다고 보고 짜야 한다({}). 앱은 그때 전구를
+                                아예 보여주지 않는다 — 눌러도 아무 일이 없는 버튼이 화면에
+                                있는 것이 제일 나쁘다.
+                              example:
+                                vi: "Chào cậu! Chúng mình cùng chơi nhé!"
+                                zh: "你好！我们一起玩吧！"
               example:
                 success: true
                 data:
-                  - { sentenceId: "arrival_1", category: "arrival", text: "안녕 나도 만나서 반가워 !" }
+                  - sentenceId: "arrival_1"
+                    category: "arrival"
+                    text: "안녕 나도 만나서 반가워 !"
+                    translations:
+                      vi: "Chào cậu! Mình cũng rất vui được gặp cậu!"
+                      zh: "你好！我也很高兴见到你！"
                   - { sentenceId: "arrival_2", category: "arrival", text: "안녕! 우리 같이 놀자!" }
                   - { sentenceId: "arrival_3", category: "arrival", text: "안녕! 같이 들어가자!" }
                   - { sentenceId: "study_1", category: "study", text: "노란 꽃이 피었어요. 예쁜 꽃이 피었어요. 바람이 살랑살랑 꽃이 웃어요." }
@@ -954,6 +979,28 @@ components:
           example:
             success: false
             error: { code: STT_FAILED, message: "STT 엔진 오류.", field: null }
+    OffScript:
+      description: |
+        (v2.1.0 신설) 아이가 고른 문장이 아니라 아주 다른 말을 했다 — OFF_SCRIPT.
+
+        **실패가 아니라 되묻기다.** 앱은 이 응답을 받으면 녹음 화면에 그대로
+        머물면서 "잘 못 들었어. 다시 말해줄래?" 로 되묻고, 다시 녹음할 수 있게
+        한다. 다른 4xx 와 같이 처리하면 안 된다 — 그러면 아이가 배우는 것이
+        "아무 말이나 하면 통과한다" 가 된다. (실제로 그랬다: 앱이 채점 실패를
+        전부 칭찬 화면으로 흘려보내서, 전혀 다른 말을 해도 "잘했어!" 가 떴다.)
+
+        같은 422 로 오는 다른 두 경우(채점할 어절이 없음 · 녹음이 비었음)도
+        아이 입장에서는 같은 일이라 같이 다룬다. 앱은 코드가 아니라 **422 인지**를
+        본다 — 코드로만 가르면 서버가 코드를 하나 더 늘리는 날 조용히 칭찬
+        화면으로 새는 길이 생긴다.
+
+        세 번까지 되묻고, 그 뒤에는 넘어갈 길을 연다(그 길도 칭찬 화면은 아니다).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          example:
+            success: false
+            error: { code: OFF_SCRIPT, message: "읽은 음성이 고른 문장과 다릅니다.", field: audio }
     RateLimited:
       description: "OpenAI API 쿼터 초과 (FastAPI) — RATE_LIMITED"
       content:

@@ -94,10 +94,11 @@ export interface paths {
          *     음성이 아니라 텍스트를 받는다 — STT는 `/ai/stt`에서 이미 끝났다.
          *
          *     **설계 계약**
-         *     - `recognizedText: null`도 유효한 요청이다 → 격려 피드백 생성 (`understood/matched: false`).
-         *     - `title`에 "틀렸어요"류 문구 금지.
-         *     - `matched` 판정 활용(별점 등)은 앱 로컬 책임. 서버는 판정 재료만 준다.
+         *     - `recognizedText: null`도 유효한 요청이다 → 격려 피드백을 만든다.
+         *     - `reaction`·`comment`에 "틀렸어요"류 문구 금지.
+         *     - 번역을 함께 내려보낸다 — 앱이 `/translate`를 따로 부르면 화면이 두 번 늦게 뜬다.
          *     - 발화 기록은 서버에 남지 않는다.
+         *     - **부르는 앱 화면이 아직 없다.** 게이트웨이·FastAPI 에는 살아 있다.
          */
         post: operations["feedback"];
         delete?: never;
@@ -193,6 +194,65 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/albums": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 내 동화 목록 (최신순)
+         * @description 표지를 그리는 데 필요한 것만 준다. `categories` 는 목록에서 **보석 줄**을
+         *     그리는 데 쓴다 — 글자를 아직 못 읽는 아이도 색이 다른 보석 네 개를 보고
+         *     그날을 알아본다.
+         */
+        get: operations["listAlbums"];
+        put?: never;
+        /**
+         * 동화를 앨범에 남긴다
+         * @description 하루를 마치며 만든 동화를 남긴다. 다음 날에도 다시 읽을 수 있게 된다.
+         *
+         *     **앱은 동화를 화면에 띄운 뒤에 부른다.** 저장을 기다렸다 보여주면 저장이
+         *     늦거나 실패하는 날 아이가 동화를 아예 못 본다. 실패해도 화면을 막지 않는다.
+         *
+         *     **삽화는 보내지 않는다.** 앱 번들의 정적 그림이고 장면의 `category` 하나로
+         *     결정된다 — 이미지를 저장하면 동화마다 같은 파일을 복제하면서, 나중에 그림을
+         *     고쳐도 옛 앨범만 낡은 그림으로 남는다.
+         */
+        post: operations["saveAlbum"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/albums/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 동화 한 편
+         * @description 앱이 이걸 받아 동화 화면을 그대로 다시 그린다.
+         *
+         *     **`childId` 를 반드시 함께 보낸다.** `id` 만으로 찾지 않는 이유는 인증이
+         *     없기 때문이다 — 번호를 하나씩 올려보는 것만으로 남의 동화를 읽을 수 있다.
+         *
+         *     주인이 아닐 때 `403` 이 아니라 `404` 를 준다. `403` 은 "있긴 있다"를
+         *     알려주는 셈이라 번호를 훑어 남의 동화가 몇 편인지 셀 수 있다.
+         */
+        get: operations["getAlbum"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -222,36 +282,138 @@ export interface components {
         };
         ChatResult: {
             /** @description STT 결과. 못 알아들으면 null (에러 아님) */
-            userText?: string | null;
-            /** @description LLM이 생성한 응답 문장 (한국어교육과정 1~2급 어휘) */
-            aiText: string;
-            audio: components["schemas"]["AudioPayload"];
+            userText: string | null;
+            /** @description 상대 캐릭터의 답 (한국어교육과정 1~2급 어휘) */
+            replyText: string;
+            audio?: components["schemas"]["AudioPayload"] | null;
+            /** @description 이 턴까지의 대화. 앱이 다음 요청에 그대로 실어 보낸다. */
+            history?: {
+                /** @enum {string} */
+                role: "user" | "assistant";
+                content: string;
+            }[];
+            /** @description 목 제공자가 만든 값이라는 표시. 실제 응답이면 키 자체가 없다. */
+            mock?: boolean;
         };
         SttResult: {
             /** @description 인식 결과. 못 알아들으면 null (에러 아님) */
             text: string | null;
             /** @description 엔진이 안 주면 null. 화면 표시 금지 */
-            confidence: number | null;
+            confidence?: number | null;
+            /**
+             * @description 인식된 언어. 앱 계약 enum 이다(`ko` 가 아니라 `KOREAN`).
+             * @default KOREAN
+             */
+            language: string;
+            /**
+             * Format: float
+             * @default 0
+             */
+            durationSec: number;
+            /** @description 구간별 인식 결과. 지금 앱 화면은 쓰지 않는다. */
+            segments?: Record<string, never>[];
         };
+        /**
+         * @description **표현 교정.** 어떤 낱말을 골랐나를 본다(발음 채점과 다르다).
+         *
+         *     번역을 여기 합쳐 내려보낸다 — 앱이 `/translate` 를 따로 부르면 같은 화면을
+         *     두 번 기다리게 된다.
+         */
         FeedbackResult: {
-            /** @description 의미가 통했는가 (아이콘 결정) */
-            understood: boolean;
-            /** @description 목표 문장과 통했는가 (별점 판정용) */
-            matched: boolean;
-            /** @description 화면 표시 금지. 내부 판정용 */
-            similarity: number;
-            /** @description 배너 제목. "틀렸어요"류 문구 금지 */
-            title: string;
-            /** @description 배너 본문 */
-            body?: string | null;
-            /** @description 더 자연스러운 표현 */
-            naturalSentence?: string | null;
-            /** @description 설명문. 불필요하면 null */
-            naturalHint?: string | null;
-            /** @description 밑줄 칠 어절. 없으면 [] */
+            /**
+             * @description 말풍선 — 알아들었다는 반응
+             * @example 잘 말했어!
+             */
+            reaction: string;
+            /**
+             * @description 안내 카드 문구
+             * @example 이렇게 말하면 더 자연스러워요.
+             */
+            comment: string;
+            /**
+             * @description 권하는 한국어 문장
+             * @example 조금만 주세요.
+             */
+            naturalSentence: string;
+            /** @description 왜 그렇게 말하는지 한 줄 설명 */
+            naturalHint: string;
+            /** @description naturalSentence 안에서 짚어줄 어절. 없으면 [] */
             highlightWords: string[];
-            /** @description naturalSentence의 모국어 번역. KOREAN이면 null */
+            /** @description 모국어 번역. nativeLanguage 가 KOREAN 이거나 없으면 null */
             translation?: string | null;
+            /** @description 번역한 언어(앱 계약 enum). 번역이 없으면 null */
+            translationLanguage?: string | null;
+        };
+        /**
+         * Format: uuid
+         * @description 기기가 처음 켜질 때 만든 UUIDv4. 로그인이 없으므로 **이것이 "누구인가"의 전부다.**
+         *
+         *     닉네임을 키로 쓰지 않는 이유는 셋이다 — 겹치고(같은 반에 "지우"가 둘),
+         *     바뀌고(메뉴에서 이름 수정), 아이 이름이 모든 조회 주소에 실린다.
+         *
+         *     앱은 `localStorage['zooearly.childId']` 에 프로필과 **따로** 보관한다.
+         *     날짜가 바뀌어 진행도가 비워질 때 앨범까지 잃으면 안 되기 때문이다.
+         *     다만 "처음부터 플레이하기"(기기를 다음 아이에게 넘기는 동선)에서는 새로 만든다.
+         * @example a355d4f5-f7ac-4b74-8733-b28236b270ac
+         */
+        ChildId: string;
+        AlbumScene: {
+            /**
+             * @description **삽화를 고르는 유일한 키.** 앱이 이 값으로 번들의 정적 그림을 찾는다.
+             *     그래서 이미지를 저장하지 않는다.
+             * @enum {string}
+             */
+            category: "school_arrival" | "class" | "lunch" | "school_departure";
+            /** @example 학교 오는 길 */
+            subtitle: string;
+            /** @example 아침에 */
+            opening?: string;
+            /**
+             * @description 아이가 실제로 고른 말. 화면에 인용 블록으로 뜬다. 고르지 않고 넘어간 장면은 null.
+             * @example 안녕! 우리 같이 놀자!
+             */
+            quote?: string | null;
+            /** @example 지우가 학교에 왔어요. */
+            narration: string;
+        };
+        AlbumSaveRequest: {
+            childId: components["schemas"]["ChildId"];
+            /**
+             * @description 만들 때의 이름. **표시용이지 키가 아니다** — 나중에 이름을 바꿔도 옛 표지는 그대로다.
+             * @example 지우
+             */
+            nickname: string;
+            /** @example 지우가 들려준 오늘 */
+            title: string;
+            scenes: components["schemas"]["AlbumScene"][];
+        };
+        AlbumSummary: {
+            /**
+             * Format: int64
+             * @example 12
+             */
+            id: number;
+            /** @example 지우가 들려준 오늘 */
+            title: string;
+            /** @example 지우 */
+            nickname: string;
+            /**
+             * Format: date-time
+             * @example 2026-08-27T01:10:51.313624Z
+             */
+            createdAt: string;
+            /** @description 목록에서 보석 줄을 그리는 데 쓴다. 장면 순서대로. */
+            categories: ("school_arrival" | "class" | "lunch" | "school_departure")[];
+        };
+        AlbumDetail: {
+            /** Format: int64 */
+            id: number;
+            title: string;
+            /** @description 그때 그 이름. 지금 프로필과 다를 수 있다. */
+            nickname: string;
+            /** Format: date-time */
+            createdAt: string;
+            scenes: components["schemas"]["AlbumScene"][];
         };
         SuccessEnvelope: {
             /** @enum {boolean} */
@@ -329,6 +491,40 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
+        /**
+         * @description (v2.1.0 신설) 아이가 고른 문장이 아니라 아주 다른 말을 했다 — OFF_SCRIPT.
+         *
+         *     **실패가 아니라 되묻기다.** 앱은 이 응답을 받으면 녹음 화면에 그대로
+         *     머물면서 "잘 못 들었어. 다시 말해줄래?" 로 되묻고, 다시 녹음할 수 있게
+         *     한다. 다른 4xx 와 같이 처리하면 안 된다 — 그러면 아이가 배우는 것이
+         *     "아무 말이나 하면 통과한다" 가 된다. (실제로 그랬다: 앱이 채점 실패를
+         *     전부 칭찬 화면으로 흘려보내서, 전혀 다른 말을 해도 "잘했어!" 가 떴다.)
+         *
+         *     같은 422 로 오는 다른 두 경우(채점할 어절이 없음 · 녹음이 비었음)도
+         *     아이 입장에서는 같은 일이라 같이 다룬다. 앱은 코드가 아니라 **422 인지**를
+         *     본다 — 코드로만 가르면 서버가 코드를 하나 더 늘리는 날 조용히 칭찬
+         *     화면으로 새는 길이 생긴다.
+         *
+         *     세 번까지 되묻고, 그 뒤에는 넘어갈 길을 연다(그 길도 칭찬 화면은 아니다).
+         */
+        OffScript: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                /**
+                 * @example {
+                 *       "success": false,
+                 *       "error": {
+                 *         "code": "OFF_SCRIPT",
+                 *         "message": "읽은 음성이 고른 문장과 다릅니다.",
+                 *         "field": "audio"
+                 *       }
+                 *     }
+                 */
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
         /** @description OpenAI API 쿼터 초과 (FastAPI) — RATE_LIMITED */
         RateLimited: {
             headers: {
@@ -367,7 +563,7 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
-        /** @description 타임아웃 초과 (Gateway) — chat 30s, 나머지 15s */
+        /** @description 타임아웃 초과 (Gateway) — tts·문장목록 15s / feedback·chat 30s / stt 45s / story 60s / pronunciation 65s */
         AiTimeout: {
             headers: {
                 [name: string]: unknown;
@@ -570,6 +766,11 @@ export interface operations {
                     "application/json": components["schemas"]["SuccessEnvelope"] & {
                         data?: {
                             audio: components["schemas"]["AudioPayload"];
+                            /**
+                             * @description 목 제공자가 만든 차임이라는 표시. **실제 음성이면 키 자체가 없다.**
+                             *     앱은 이 값을 보고 브라우저 음성합성으로 대신 읽어줄지 정한다.
+                             */
+                            mock?: boolean;
                         };
                     };
                 };
@@ -621,17 +822,15 @@ export interface operations {
                      * @example {
                      *       "success": true,
                      *       "data": {
-                     *         "understood": true,
-                     *         "matched": true,
-                     *         "similarity": 0.92,
-                     *         "title": "잘했어요!",
-                     *         "body": "무슨 뜻인지 잘 이해했어요.",
+                     *         "reaction": "무슨 뜻인지 잘 알겠어!",
+                     *         "comment": "이렇게 말하면 더 자연스러워요.",
                      *         "naturalSentence": "많이 주세요.",
                      *         "naturalHint": "'주세여'보다 '주세요'가 좋아요.",
                      *         "highlightWords": [
                      *           "주세요"
                      *         ],
-                     *         "translation": "Cho mình nhiều nhé."
+                     *         "translation": "Cho mình nhiều nhé.",
+                     *         "translationLanguage": "VIETNAMESE"
                      *       }
                      *     }
                      */
@@ -682,7 +881,7 @@ export interface operations {
                      *       "success": true,
                      *       "data": {
                      *         "sentenceId": "arrival_2",
-                     *         "sentence": "안녕! 우리 친하게 지내자",
+                     *         "sentence": "안녕! 우리 같이 놀자!",
                      *         "targetWord": "지내자",
                      *         "targetIndex": 2,
                      *         "targetZ": -1.82,
@@ -746,7 +945,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             413: components["responses"]["PayloadTooLarge"];
-            422: components["responses"]["SttFailed"];
+            422: components["responses"]["OffScript"];
             429: components["responses"]["RateLimited"];
             502: components["responses"]["AiServerError"];
             504: components["responses"]["AiTimeout"];
@@ -774,17 +973,21 @@ export interface operations {
                      *         {
                      *           "sentenceId": "arrival_1",
                      *           "category": "arrival",
-                     *           "text": "안녕 나도 만나서 반가워 !"
+                     *           "text": "안녕 나도 만나서 반가워 !",
+                     *           "translations": {
+                     *             "vi": "Chào cậu! Mình cũng rất vui được gặp cậu!",
+                     *             "zh": "你好！我也很高兴见到你！"
+                     *           }
                      *         },
                      *         {
                      *           "sentenceId": "arrival_2",
                      *           "category": "arrival",
-                     *           "text": "안녕! 우리 친하게 지내자"
+                     *           "text": "안녕! 우리 같이 놀자!"
                      *         },
                      *         {
                      *           "sentenceId": "arrival_3",
                      *           "category": "arrival",
-                     *           "text": "안녕 잘 부탁해 !"
+                     *           "text": "안녕! 같이 들어가자!"
                      *         },
                      *         {
                      *           "sentenceId": "study_1",
@@ -809,17 +1012,17 @@ export interface operations {
                      *         {
                      *           "sentenceId": "departure_1",
                      *           "category": "departure",
-                     *           "text": "안녕히 가세요!"
+                     *           "text": "선생님, 안녕히 가세요!"
                      *         },
                      *         {
                      *           "sentenceId": "departure_2",
                      *           "category": "departure",
-                     *           "text": "네, 안녕히 가세요."
+                     *           "text": "선생님, 감사합니다!"
                      *         },
                      *         {
                      *           "sentenceId": "departure_3",
                      *           "category": "departure",
-                     *           "text": "안녕히 계세요 !"
+                     *           "text": "내일 또 뵙겠습니다!"
                      *         }
                      *       ]
                      *     }
@@ -838,6 +1041,27 @@ export interface operations {
                             category?: "arrival" | "study" | "lunch" | "departure";
                             /** @description 화면에 보여줄 문장 원문 */
                             text?: string;
+                            /**
+                             * @description (v2.1.0 신설) 이 문장의 모국어 뜻. 키는 언어 코드
+                             *     (vi=베트남어, zh=중국어), 값은 번역문이다. 한국어는 키가
+                             *     없다 — 원문이 곧 그것이다.
+                             *
+                             *     앱의 힌트 전구(💡)가 이 값만 본다. 번역을 따로 부르는
+                             *     요청은 없다 — 문장이 10개로 고정이라 목록에 함께 담는
+                             *     편이 맞다. 누를 때마다 부르면 아이가 전구를 누르고 몇 초를
+                             *     기다려야 하고, 그 사이 자기가 무엇을 물었는지를 잊는다.
+                             *
+                             *     비어 있을 수 있다고 보고 짜야 한다({}). 앱은 그때 전구를
+                             *     아예 보여주지 않는다 — 눌러도 아무 일이 없는 버튼이 화면에
+                             *     있는 것이 제일 나쁘다.
+                             * @example {
+                             *       "vi": "Chào cậu! Chúng mình cùng chơi nhé!",
+                             *       "zh": "你好！我们一起玩吧！"
+                             *     }
+                             */
+                            translations?: {
+                                [key: string]: string;
+                            };
                         }[];
                     };
                 };
@@ -962,6 +1186,100 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             502: components["responses"]["AiServerError"];
             504: components["responses"]["AiTimeout"];
+        };
+    };
+    listAlbums: {
+        parameters: {
+            query: {
+                childId: components["schemas"]["ChildId"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 목록 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data?: components["schemas"]["AlbumSummary"][];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+        };
+    };
+    saveAlbum: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AlbumSaveRequest"];
+            };
+        };
+        responses: {
+            /** @description 저장됨 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data?: {
+                            /**
+                             * Format: int64
+                             * @example 12
+                             */
+                            id: number;
+                        };
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+        };
+    };
+    getAlbum: {
+        parameters: {
+            query: {
+                childId: components["schemas"]["ChildId"];
+            };
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 동화 한 편 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data?: components["schemas"]["AlbumDetail"];
+                    };
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            /** @description 없거나 내 것이 아니다 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
         };
     };
 }

@@ -1,6 +1,6 @@
 # 쥬얼리 (ZooEarly) — AI API 명세서
 
-> **v2.0.0 · 2026-08-27**
+> **v2.1.0 · 2026-08-27**
 > React Native 앱 ↔ API Gateway ↔ FastAPI Inference Server(STT / LLM / TTS → OpenAI API)
 > **이 문서가 기존 `zooearly-api-spec.md`(13개 엔드포인트)를 대체한다.** 시나리오·스토리·진행 상태는 전부 앱 로컬로 이동했고, 서버에 남는 것은 AI 추론뿐이다.
 
@@ -21,6 +21,7 @@
 |---|---|---|---|
 | **2.0.0** | 2026-08-27 | **동화 앨범 신설**(`/api/v1/albums` 3개) — 게이트웨이가 MySQL 에 동화를 남긴다. 엔드포인트별 타임아웃 분리. `@Valid` 검증 실패도 `400 INVALID_PARAMETER` 로 통일 | ⚠️ **있음** — 앱이 기기마다 `childId`(UUIDv4)를 만들어 두고, 동화를 **화면에 띄운 뒤** 앨범에 올린다. 조회할 때도 `childId` 를 함께 보낸다 |
 | **1.7.0** | 2026-08-24 | `story`(동화 생성) 추가 — 하루치 4장면을 동화로 엮는다 | ⚠️ **있음** — 앱이 등교·수업·점심·하교 기록을 **모아뒀다가** 한 번에 보내야 한다. 서버는 저장하지 않는다(무상태). 응답이 오래 걸려(최대 60초) 로딩 화면이 필요하다 |
+| **2.1.0** | 2026-08-27 | `pronunciation/sentences` 응답에 `translations`(모국어 뜻) 추가 · `422 OFF_SCRIPT` 에러 코드 신설(§1.3) | 🟢 **없음(하위호환)** — 필드가 하나 붙기만 한다. 안 읽으면 예전과 똑같다. 새로 생기거나 사라진 엔드포인트는 **없고, 게이트웨이는 한 줄도 바뀌지 않는다**(§6-1 계약 7) |
 | **1.6.0** | 2026-08-24 | `pronunciation/sentences`에 `study`(수업시간 시) 카테고리 추가. 9개 → **10개** | ⚠️ **있음** — 수업시간 "같이 읽어볼까요?"도 이제 이 목록의 `sentenceId`로 `/pronunciation`을 부를 수 있다. `study`는 3개가 아니라 1개다 |
 | **1.5.0** | 2026-08-24 | `pronunciation/sentences` 신설 · `pronunciation`의 `targetSentence`→`sentenceId` 전환 · `quizSentence` 제거 · 잘함/못함 판정이 앱→FastAPI로 이동 | ⚠️ **있음** — "표현 고르기" 선택지가 앱 번들이 아니라 서버 목록이 된다. `/pronunciation` 요청 필드명이 바뀐다. 빈칸 문장은 앱이 직접 만들어야 한다 |
 | **1.4.0** | 2026-08-22 | `pronunciation`(발음 채점) 추가 · 오디오 **최대 길이 60초 → 30초** | ⚠️ **있음** — 녹음을 30초에서 끊어야 한다. 발음 피드백 화면은 신규 구현 |
@@ -159,13 +160,16 @@ FastAPI가 경로를 또 바꿔도 앱과 이 명세는 그대로다 — 게이�
 | 400 | `AUDIO_TOO_LARGE` | Gateway | 음성 파일 10MB 초과 |
 | 413 | `PAYLOAD_TOO_LARGE` | Gateway | 요청 전체 용량 초과 |
 | 422 | `STT_FAILED` | FastAPI | STT 엔진 자체 실패 (인식 실패와 다름 — §2 계약 참고) |
+| 422 | `OFF_SCRIPT` | FastAPI | **(v2.1.0 신설)** 아이가 고른 문장이 아니라 아주 다른 말을 했다 (§6 계약 6) |
 | 429 | `RATE_LIMITED` | FastAPI | OpenAI API 쿼터 초과 |
 | 502 | `AI_SERVER_ERROR` | Gateway | FastAPI가 5xx를 반환하거나 연결 불가 |
 | 404 | `NOT_FOUND` | Gateway | 없는 경로 · 앨범이 없거나 `childId` 가 그 동화의 주인이 아님(§9.3) |
 | 504 | `AI_TIMEOUT` | Gateway | FastAPI 응답이 §0.4 타임아웃 초과 |
 | 500 | `INTERNAL_ERROR` | Gateway | 게이트웨이 자체 오류 |
 
-> **FastAPI의 어떤 에러도 앱에 그대로 새지 않는다.** FastAPI가 `{"detail": "..."}`를 내더라도 게이트웨이가 `AI_SERVER_ERROR`로 감싼다. 단 `STT_FAILED` / `RATE_LIMITED`는 FastAPI가 §1.2 포맷으로 직접 만들어 보내고 게이트웨이는 그대로 통과시킨다.
+> **FastAPI의 어떤 에러도 앱에 그대로 새지 않는다.** FastAPI가 `{"detail": "..."}`를 내더라도 게이트웨이가 `AI_SERVER_ERROR`로 감싼다. 단 `STT_FAILED` / `OFF_SCRIPT` / `RATE_LIMITED`는 FastAPI가 §1.2 포맷으로 직접 만들어 보내고 게이트웨이는 그대로 통과시킨다.
+
+> **`OFF_SCRIPT` 를 `INVALID_PARAMETER` 와 갈라 놓은 이유.** 나머지 4xx 는 아이가 할 수 있는 일이 없지만, 이건 **다시 말하면 되는 일**이다. 앱이 두 경우를 구분하지 못하면 둘 다 같은 처리를 하게 되는데 실제로 그랬다 — 앱이 채점 실패를 전부 칭찬 화면으로 흘려보내서, 아이가 전혀 다른 말을 해도 "잘했어!" 가 떴다. 서버는 알고 있었고 앱이 그 신호를 버렸다. 상태 코드를 422 로 둔 것도 필요해서다: 게이트웨이는 422/429 만 본문째 통과시키므로(§1.3) 다른 코드로 바꾸면 이 구분이 앱까지 닿지 못한다.
 
 ### 1.4 오디오 규격
 
@@ -544,7 +548,9 @@ curl -X POST https://zooearly.app/api/v1/ai/pronunciation \
 > 그래도 실제 중도입국 아동 녹음으로 검증된 값은 아니므로, 시연·초기 운영 중
 > "다 틀렸다고 나온다"는 피드백이 들어오면 FastAPI 쪽에 임계값 재조정을 요청한다.
 
-**에러** — `400 INVALID_PARAMETER` / `UNSUPPORTED_AUDIO_FORMAT` / `AUDIO_TOO_LARGE`, `422 STT_FAILED`(목록에 없는 `sentenceId` 포함), `429 RATE_LIMITED`, `502 AI_SERVER_ERROR`, `504 AI_TIMEOUT`
+**에러** — `400 INVALID_PARAMETER` / `UNSUPPORTED_AUDIO_FORMAT` / `AUDIO_TOO_LARGE`, `422 STT_FAILED`(목록에 없는 `sentenceId` 포함), **`422 OFF_SCRIPT`**, `429 RATE_LIMITED`, `502 AI_SERVER_ERROR`, `504 AI_TIMEOUT`
+
+6. **`422 OFF_SCRIPT` 는 실패가 아니라 되묻기다.** 아이가 고른 문장이 아니라 아주 다른 말을 했을 때 온다. 앱은 이 코드만 따로 받아 **녹음 화면에 그대로 머물면서** "잘 못 들었어. 다시 말해줄래?" 로 되묻고, 다시 녹음할 수 있게 한다. 다른 4xx 와 같이 처리하면 안 된다 — 그러면 아이가 배우는 것이 "아무 말이나 하면 통과한다" 가 된다. 다만 세 번까지만 되묻고, 그 뒤에는 넘어갈 길(고스트 버튼)을 연다. 마이크가 멀거나 주변이 시끄러운 날에 아이를 한 화면에 가둘 수는 없다. **그 길도 칭찬 화면으로는 가지 않는다.**
 
 ---
 
@@ -567,12 +573,21 @@ GET /api/v1/ai/pronunciation/sentences
 | `sentenceId` | `string` | `POST /api/v1/ai/pronunciation`(§6)에 그대로 실어 보내는 값 | `"arrival_1"` |
 | `category` | `string(enum)` | `arrival` / `study` / `lunch` / `departure`. 화면 그룹핑용 | `"arrival"` |
 | `text` | `string` | 화면에 보여줄 문장 원문. `study`만 여러 문장이 한 항목에 이어져 있다 (시 전체) | `"안녕 나도 만나서 반가워 !"` |
+| `translations` | `object` | **(v2.1.0 신설)** 이 문장의 모국어 뜻. 키는 언어 코드(`vi`·`zh`), 값은 번역문. 한국어는 키가 없다 — 원문이 곧 그것이다 | `{ "vi": "Chào cậu!…", "zh": "你好！…" }` |
 
 ```json
 {
   "success": true,
   "data": [
-    { "sentenceId": "arrival_1",   "category": "arrival",   "text": "안녕 나도 만나서 반가워 !" },
+    {
+      "sentenceId": "arrival_1",
+      "category": "arrival",
+      "text": "안녕 나도 만나서 반가워 !",
+      "translations": {
+        "vi": "Chào cậu! Mình cũng rất vui được gặp cậu!",
+        "zh": "你好！我也很高兴见到你！"
+      }
+    },
     { "sentenceId": "arrival_2",   "category": "arrival",   "text": "안녕! 우리 같이 놀자!" },
     { "sentenceId": "arrival_3",   "category": "arrival",   "text": "안녕! 같이 들어가자!" },
     { "sentenceId": "study_1",     "category": "study",     "text": "노란 꽃이 피었어요. 예쁜 꽃이 피었어요. 바람이 살랑살랑 꽃이 웃어요." },
@@ -599,6 +614,21 @@ GET /api/v1/ai/pronunciation/sentences
    서버가 바뀔 가능성을 생각하면 세션마다 한 번은 새로 받는 편이 안전하다.
 5. **`말해보기`(자유 발화) 경로에는 `sentenceId`가 없다.** 이 목록에서 문장을 **고른**
    경우에만 `sentenceId`가 생기고, 그 값으로만 §6 발음 채점을 부를 수 있다.
+6. **번역을 여기에 실어 보내는 것은 의도한 설계다.** 앱의 힌트 전구(💡)를 누르면
+   퀴즈 문장의 모국어 뜻이 뜨는데, 그때 번역을 따로 부르지 않는다. 문장이 10개로
+   고정이라 목록에 함께 담는 편이 맞다 — 누를 때마다 부르면 아이가 전구를 누르고
+   몇 초를 기다려야 하고, 그 사이 자기가 무엇을 물었는지를 잊는다. 게이트웨이에
+   번역 엔드포인트가 없다는 사정도 같은 방향을 가리켰다(FastAPI의
+   `/internal/v1/text/translate`는 게이트웨이가 노출하지 않는다).
+7. **v2.1.0 은 하위호환이다.** `translations` 는 **추가만** 됐다. 기존 필드는 이름도
+   타입도 그대로고, 이 필드를 안 읽는 클라이언트는 예전과 완전히 같이 동작한다.
+   게이트웨이는 이 응답의 본문을 파싱하지 않고 문자열째 흘려보내므로
+   (`AiRelayService.sentences()` → `ResponseEntity<String>`) **게이트웨이 코드는
+   한 줄도 바뀌지 않았다.** 새 엔드포인트도, 없어진 엔드포인트도 없다.
+8. **번역이 비어 있을 수 있다고 보고 짜야 한다.** 문장을 새로 넣으면서 번역을
+   빠뜨리면 `{}` 가 온다. 앱은 그때 전구를 아예 보여주지 않는다 — 눌러도 아무 일이
+   없는 버튼이 화면에 있는 것이 제일 나쁘다. (서버 쪽 회귀 테스트:
+   `test_every_sentence_carries_mother_tongue_translations`)
 
 **에러** — `502 AI_SERVER_ERROR`, `504 AI_TIMEOUT`
 

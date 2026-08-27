@@ -148,12 +148,15 @@ export interface paths {
         };
         /**
          * 발음 연습 문장 목록
-         * @description 발음 연습용 문장 10개(등교·급식·하교 3개씩 + 수업시간 시 1개)를 돌려준다.
+         * @description 발음 연습용 문장 21개를 돌려준다 — 등교 9 · 수업시간 동시 3 · 급식 3 · 하교 6.
+         *     개수는 카테고리마다 다르고 콘텐츠라 앞으로도 늘어난다. 숫자로 못박지 마라.
          *     "표현 고르기" 화면의 선택지 3개, 수업시간 "같이 읽어볼까요?"의 시 구절이
          *     모두 여기서 온다 — 앱 번들 데이터가 아니다
          *     (2026-08-24부터. 이전에는 시나리오별로 앱에 하드코딩돼 있었다).
          *
-         *     `category`로 필터링해서 현재 시나리오에 맞는 항목만 보여준다.
+         *     `category`로 필터링한 뒤 **무작위 3개만** 화면에 띄운다 — 아홉 개를 한 번에
+         *     보여주면 아이가 고르지 못하고 헤맨다. 뽑기는 앱이 하고, 서버는 누가 불러도
+         *     같은 목록을 준다.
          *     고른 문장의 `sentenceId`를 `POST /ai/pronunciation`에 그대로 실어 보낸다.
          */
         get: operations["pronunciationSentences"];
@@ -492,7 +495,16 @@ export interface components {
             };
         };
         /**
-         * @description (v2.1.0 신설) 아이가 고른 문장이 아니라 아주 다른 말을 했다 — OFF_SCRIPT.
+         * @description 발음 채점이 이 녹음으로는 성립하지 않는다. 두 가지 code 로 온다.
+         *
+         *     | code | field | 언제 |
+         *     |---|---|---|
+         *     | `OFF_SCRIPT` | audio | 고른 문장이 아니라 아주 다른 말을 했다 (v2.1.0 신설) |
+         *     | `INVALID_PARAMETER` | audio | 녹음이 비었거나 · 20MB 초과 · 채점할 어절이 하나도 없다 |
+         *     | `INVALID_PARAMETER` | sentenceId | 문장 미선택 · 목록에 없는 id — 앱의 버그다 |
+         *
+         *     **STT_FAILED 는 이 경로에 오지 않는다.** 발음 채점은 STT 를 거치지 않고
+         *     오디오를 그대로 채점 서비스에 넘긴다. 이전 명세의 오기였다.
          *
          *     **실패가 아니라 되묻기다.** 앱은 이 응답을 받으면 녹음 화면에 그대로
          *     머물면서 "잘 못 들었어. 다시 말해줄래?" 로 되묻고, 다시 녹음할 수 있게
@@ -507,21 +519,11 @@ export interface components {
          *
          *     세 번까지 되묻고, 그 뒤에는 넘어갈 길을 연다(그 길도 칭찬 화면은 아니다).
          */
-        OffScript: {
+        PronunciationUnprocessable: {
             headers: {
                 [name: string]: unknown;
             };
             content: {
-                /**
-                 * @example {
-                 *       "success": false,
-                 *       "error": {
-                 *         "code": "OFF_SCRIPT",
-                 *         "message": "읽은 음성이 고른 문장과 다릅니다.",
-                 *         "field": "audio"
-                 *       }
-                 *     }
-                 */
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
@@ -945,7 +947,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             413: components["responses"]["PayloadTooLarge"];
-            422: components["responses"]["OffScript"];
+            422: components["responses"]["PronunciationUnprocessable"];
             429: components["responses"]["RateLimited"];
             502: components["responses"]["AiServerError"];
             504: components["responses"]["AiTimeout"];
@@ -1034,8 +1036,10 @@ export interface operations {
                             /**
                              * @description 등교/수업시간/급식/하교 구분. 소문자이고 §1.5의 Scenario enum
                              *     (ARRIVAL/CLASS/LUNCH/DISMISSAL, 대문자)과 표기가 다르다 —
-                             *     이 API 전용 값이니 섞어 쓰지 않는다. study는 1개뿐이다(시 전체가
-                             *     한 항목에 이어져 있다) — 나머지 3개 카테고리는 3개씩이다.
+                             *     이 API 전용 값이니 섞어 쓰지 않는다.
+                             *     개수는 카테고리마다 다르다(arrival 9 · study 3 · lunch 3 ·
+                             *     departure 6). study 한 항목은 문장 하나가 아니라 동시 한 편
+                             *     전체가 이어져 있다.
                              * @enum {string}
                              */
                             category?: "arrival" | "study" | "lunch" | "departure";
@@ -1061,6 +1065,49 @@ export interface operations {
                              */
                             translations?: {
                                 [key: string]: string;
+                            };
+                            /**
+                             * @description (v2.2.0 신설) 번역문의 어느 조각이 한국어 어느 어절인지.
+                             *     빈칸 퀴즈에서 비운 어절이 모국어 문장의 어디인지 짚어준다.
+                             *
+                             *     조각은 **번역문을 읽는 순서**대로다 — 한국어 순서가 아니라
+                             *     k 가 뒤죽박죽인 것이 정상이다. 한 조각이 어절 여럿을 덮을 수
+                             *     있다(굳은 인사는 쪼개면 뜻이 어긋난다).
+                             *
+                             *     조각을 이으면 translations 와 글자 하나까지 같다
+                             *     (vi 는 공백 한 칸, zh 는 붙여서). 서버 기동 시 검산한다.
+                             *
+                             *     **비어 있을 수 있다** — 동시(study)는 빈칸 퀴즈를 내지 않아
+                             *     {} 다. 그때 앱은 뜻만 통째로 보여준다.
+                             * @example {
+                             *       "vi": [
+                             *         {
+                             *           "t": "Cho con",
+                             *           "k": [
+                             *             1
+                             *           ]
+                             *         },
+                             *         {
+                             *           "t": "một chút thôi ạ.",
+                             *           "k": [
+                             *             0
+                             *           ]
+                             *         }
+                             *       ]
+                             *     }
+                             */
+                            translationParts?: {
+                                [key: string]: {
+                                    /** @description 번역문 조각 */
+                                    t: string;
+                                    /**
+                                     * @description 이 조각이 대응하는 한국어 어절 인덱스들
+                                     *     (text.split(' ') 기준. /pronunciation 의
+                                     *     targetIndex 와 같은 눈금이다).
+                                     *     대응이 없으면 빈 배열.
+                                     */
+                                    k: number[];
+                                }[];
                             };
                         }[];
                     };

@@ -1,17 +1,17 @@
 # 쥬얼리 (ZooEarly) — AI API 명세서
 
-> **v1.7.0 · 2026-08-24**
+> **v2.0.0 · 2026-08-27**
 > React Native 앱 ↔ API Gateway ↔ FastAPI Inference Server(STT / LLM / TTS → OpenAI API)
 > **이 문서가 기존 `zooearly-api-spec.md`(13개 엔드포인트)를 대체한다.** 시나리오·스토리·진행 상태는 전부 앱 로컬로 이동했고, 서버에 남는 것은 AI 추론뿐이다.
 
 | 항목 | 값 |
 |---|---|
-| Base URL | `https://zooearly.app/api/v1/ai` |
+| Base URL | `https://zooearly-gw.jollyhill-992be81c.koreacentral.azurecontainerapps.io/api/v1` · 로컬 `http://localhost:8080/api/v1` |
 | 프로토콜 | HTTPS only |
 | 인코딩 | UTF-8 |
 | 요청/응답 | `application/json` (음성 업로드만 `multipart/form-data`) |
 | 인증 | 없음 (프로토타입) |
-| 엔드포인트 | **6개** — `chat` / `stt` / `tts` / `feedback` / `pronunciation` / `pronunciation/sentences` |
+| 엔드포인트 | **10개** — `/api/v1/ai` 7개(`chat`·`stt`·`tts`·`feedback`·`pronunciation`·`pronunciation/sentences`·`story`) + `/api/v1/albums` 3개(§9) |
 
 ---
 
@@ -19,6 +19,7 @@
 
 | 버전 | 날짜 | 변경 | 앱 영향 |
 |---|---|---|---|
+| **2.0.0** | 2026-08-27 | **동화 앨범 신설**(`/api/v1/albums` 3개) — 게이트웨이가 MySQL 에 동화를 남긴다. 엔드포인트별 타임아웃 분리. `@Valid` 검증 실패도 `400 INVALID_PARAMETER` 로 통일 | ⚠️ **있음** — 앱이 기기마다 `childId`(UUIDv4)를 만들어 두고, 동화를 **화면에 띄운 뒤** 앨범에 올린다. 조회할 때도 `childId` 를 함께 보낸다 |
 | **1.7.0** | 2026-08-24 | `story`(동화 생성) 추가 — 하루치 4장면을 동화로 엮는다 | ⚠️ **있음** — 앱이 등교·수업·점심·하교 기록을 **모아뒀다가** 한 번에 보내야 한다. 서버는 저장하지 않는다(무상태). 응답이 오래 걸려(최대 60초) 로딩 화면이 필요하다 |
 | **1.6.0** | 2026-08-24 | `pronunciation/sentences`에 `study`(수업시간 시) 카테고리 추가. 9개 → **10개** | ⚠️ **있음** — 수업시간 "같이 읽어볼까요?"도 이제 이 목록의 `sentenceId`로 `/pronunciation`을 부를 수 있다. `study`는 3개가 아니라 1개다 |
 | **1.5.0** | 2026-08-24 | `pronunciation/sentences` 신설 · `pronunciation`의 `targetSentence`→`sentenceId` 전환 · `quizSentence` 제거 · 잘함/못함 판정이 앱→FastAPI로 이동 | ⚠️ **있음** — "표현 고르기" 선택지가 앱 번들이 아니라 서버 목록이 된다. `/pronunciation` 요청 필드명이 바뀐다. 빈칸 문장은 앱이 직접 만들어야 한다 |
@@ -47,7 +48,8 @@ React Native App ──HTTPS/REST──▶ API Gateway ──HTTP──▶ FastA
 2. **전달** — 검증을 통과한 요청을 FastAPI의 동일 엔드포인트로 그대로 넘기고, 응답을 그대로 되돌려준다. **body를 가공하지 않는다.**
 3. **에러 통일** — FastAPI가 죽었거나 늦거나 5xx를 내면, 앱에는 항상 §1.3의 공통 에러 포맷으로 변환해서 내려준다. 앱은 FastAPI의 생(raw) 에러를 볼 일이 없다.
 
-**하지 않는 일**: DB 저장, 대화 이력 관리, 사용자 조회, 비즈니스 로직. 게이트웨이는 상태가 없다(stateless).
+**하지 않는 일**: 중계 경로(`/api/v1/ai/*`)는 DB 저장·이력 관리·사용자 조회·비즈니스 로직을 하지 않는다.
+게이트웨이가 스스로 데이터를 갖는 곳은 **동화 앨범(§9) 하나뿐**이다.
 
 ### 0.2 상태는 전부 앱에 있다
 
@@ -57,6 +59,11 @@ React Native App ──HTTPS/REST──▶ API Gateway ──HTTP──▶ FastA
 - `feedback`의 목표 문장(`targetSentence`) — 스텝 데이터가 앱 번들에 있으므로 앱이 보낸다
 - 시나리오 컨텍스트(`scenario`) — LLM 프롬프트 구성용 힌트로 앱이 보낸다
 - 아이 호칭(`nickname`) — 앱 온보딩에서 필수로 받는 값이므로 앱이 매 요청에 보낸다. 서버는 저장하지 않는다
+
+**예외 하나 — 동화 앨범(§9).** 2026-08-27 부터 아이가 만든 동화는 게이트웨이가
+MySQL 에 남긴다. 다음 날에도 다시 읽을 수 있어야 하기 때문이다. 그 밖의 것(진행도 ·
+모국어 · 녹음)은 여전히 서버에 남지 않는다. 앨범은 기기가 만든 `childId`(UUIDv4)로
+묶고 닉네임은 표시용으로만 함께 저장한다 — 자세한 것은 §9 와 `zooearly-erd.md`.
 
 **예외 — `pronunciation`의 `sentenceId`(§6-1)는 앱이 만들지 않는다.** 발음 연습 문장
 10개는 고정 목록이라 서버(`GET /pronunciation/sentences`)가 준다. 사용자별로 다른 걸
@@ -77,12 +84,17 @@ FastAPI가 경로를 또 바꿔도 앱과 이 명세는 그대로다 — 게이�
 | 구간 | 값 | 초과 시 |
 |---|---|---|
 | Gateway → FastAPI 연결 | 3s | `504 AI_TIMEOUT` |
-| Gateway → FastAPI 응답 (`tts` / `feedback` / 문장 목록) | 15s | `504 AI_TIMEOUT` |
+| Gateway → FastAPI 응답 (`tts` / 문장 목록) | 15s | `504 AI_TIMEOUT` |
+| Gateway → FastAPI 응답 (`feedback` — OpenAI 를 두 번 직렬로) | 30s | `504 AI_TIMEOUT` |
 | Gateway → FastAPI 응답 (`chat` — STT+LLM+TTS 3단) | 30s | `504 AI_TIMEOUT` |
 | Gateway → FastAPI 응답 (`stt`) | 45s | `504 AI_TIMEOUT` |
 | Gateway → FastAPI 응답 (`pronunciation`) | 65s | `504 AI_TIMEOUT` |
 | Gateway → FastAPI 응답 (`story`) | 60s | `504 AI_TIMEOUT` |
 | 앱 → Gateway | 위 값 + 5s 여유를 앱 쪽 클라이언트에 설정 | 앱 로컬 폴백 |
+
+`feedback` 이 30초인 이유는 다르다 — 추론 서버가 그 안에서 OpenAI 를 **두 번 직렬로**
+부른다(교정 문장을 만들고, 그 결과를 모국어로 번역). 15초로 뒀다가 배포 직후 실측에서
+504 가 났다.
 
 `stt` 와 `pronunciation` 이 유독 긴 이유는 **모델이 느려서가 아니라 컨테이너가 자고 있어서다.**
 둘 다 min-replicas 가 0인 Azure Container App 을 부르고, 유휴 뒤 첫 요청이 컨테이너를
@@ -149,6 +161,7 @@ FastAPI가 경로를 또 바꿔도 앱과 이 명세는 그대로다 — 게이�
 | 422 | `STT_FAILED` | FastAPI | STT 엔진 자체 실패 (인식 실패와 다름 — §2 계약 참고) |
 | 429 | `RATE_LIMITED` | FastAPI | OpenAI API 쿼터 초과 |
 | 502 | `AI_SERVER_ERROR` | Gateway | FastAPI가 5xx를 반환하거나 연결 불가 |
+| 404 | `NOT_FOUND` | Gateway | 없는 경로 · 앨범이 없거나 `childId` 가 그 동화의 주인이 아님(§9.3) |
 | 504 | `AI_TIMEOUT` | Gateway | FastAPI 응답이 §0.4 타임아웃 초과 |
 | 500 | `INTERNAL_ERROR` | Gateway | 게이트웨이 자체 오류 |
 
@@ -370,7 +383,7 @@ Content-Type: application/json
 ## 5. POST /api/v1/ai/feedback — 발화 피드백 생성
 
 > ⚠️ **현재 이 엔드포인트를 부르는 화면이 없다.** 표현 교정 화면("이렇게 말하면 더
-> 자연스러워요")을 구현하지 않기로 했고, FastAPI 쪽에도 대응 API가 없다.
+> 자연스러워요")을 구현하지 않기로 했고, FastAPI 에는 `/internal/v1/feedback/expression` 이 구현돼 있고 게이트웨이도 연결돼 있다 — **부르는 앱 화면만 없다.**
 > 게이트웨이에는 구현·테스트가 끝난 상태로 남겨둔다 — 나중에 화면이 생기면
 > 앱에서 부르기만 하면 된다. 아래 명세는 그때를 위한 것이다.
 
@@ -481,7 +494,7 @@ curl -X POST https://zooearly.app/api/v1/ai/pronunciation \
 | 이름 | 타입 | 설명 | 예시 |
 |---|---|---|---|
 | `sentenceId` | `string` | 요청에 실은 값을 그대로 돌려준다 | `"arrival_2"` |
-| `sentence` | `string` | 채점 대상 문장 | `"안녕! 우리 친하게 지내자"` |
+| `sentence` | `string` | 채점 대상 문장 | `"안녕! 우리 같이 놀자!"` |
 | `targetWord` | `string?` | **가장 약하게 발음한 어절.** 빈칸으로 만들 대상. **`null`이면 전부 기준 이상** — 아래 계약 3 참고 | `"지내자"` |
 | `targetIndex` | `integer?` | 그 어절이 몇 번째인가 (0부터) | `2` |
 | `targetZ` | `number?` | 그 어절의 z점수. **낮을수록 약함** | `-1.82` |
@@ -496,7 +509,7 @@ curl -X POST https://zooearly.app/api/v1/ai/pronunciation \
   "success": true,
   "data": {
     "sentenceId": "arrival_2",
-    "sentence": "안녕! 우리 친하게 지내자",
+    "sentence": "안녕! 우리 같이 놀자!",
     "targetWord": "지내자",
     "targetIndex": 2,
     "targetZ": -1.82,
@@ -560,15 +573,15 @@ GET /api/v1/ai/pronunciation/sentences
   "success": true,
   "data": [
     { "sentenceId": "arrival_1",   "category": "arrival",   "text": "안녕 나도 만나서 반가워 !" },
-    { "sentenceId": "arrival_2",   "category": "arrival",   "text": "안녕! 우리 친하게 지내자" },
-    { "sentenceId": "arrival_3",   "category": "arrival",   "text": "안녕 잘 부탁해 !" },
+    { "sentenceId": "arrival_2",   "category": "arrival",   "text": "안녕! 우리 같이 놀자!" },
+    { "sentenceId": "arrival_3",   "category": "arrival",   "text": "안녕! 같이 들어가자!" },
     { "sentenceId": "study_1",     "category": "study",     "text": "노란 꽃이 피었어요. 예쁜 꽃이 피었어요. 바람이 살랑살랑 꽃이 웃어요." },
     { "sentenceId": "lunch_1",     "category": "lunch",     "text": "조금만 주세요." },
     { "sentenceId": "lunch_2",     "category": "lunch",     "text": "적당히 주세요." },
     { "sentenceId": "lunch_3",     "category": "lunch",     "text": "많이 주세요." },
-    { "sentenceId": "departure_1", "category": "departure", "text": "안녕히 가세요!" },
-    { "sentenceId": "departure_2", "category": "departure", "text": "네, 안녕히 가세요." },
-    { "sentenceId": "departure_3", "category": "departure", "text": "안녕히 계세요 !" }
+    { "sentenceId": "departure_1", "category": "departure", "text": "선생님, 안녕히 가세요!" },
+    { "sentenceId": "departure_2", "category": "departure", "text": "선생님, 감사합니다!" },
+    { "sentenceId": "departure_3", "category": "departure", "text": "내일 또 뵙겠습니다!" }
   ]
 }
 ```
@@ -591,7 +604,7 @@ GET /api/v1/ai/pronunciation/sentences
 
 ---
 
-## 엔드포인트 요약 (6개)
+## 엔드포인트 요약 (10개)
 
 | 절 | Method | Path | 입력 | 출력 | 쓰는 화면 |
 |---|---|---|---|---|---|
@@ -602,6 +615,13 @@ GET /api/v1/ai/pronunciation/sentences
 | §6 | POST | `/api/v1/ai/pronunciation` | 음성 + `sentenceId` (multipart) | **발음 채점** 객체 | 발음 피드백 (빈칸 퀴즈) |
 | §6-1 | GET | `/api/v1/ai/pronunciation/sentences` | 없음 | 문장 10개 배열 | 어떤 표현을 사용해볼까요?, 같이 읽어볼까요? |
 | §6-2 | POST | `/api/v1/ai/story` | 하루치 4장면 (JSON) | **동화** 객체 | 동화 생성 |
+| §9 | POST | `/api/v1/albums` | `childId` + 동화 (JSON) | `{ id }` | 동화가 만들어진 직후 (앱이 자동으로) |
+| §9 | GET | `/api/v1/albums` | `childId` (쿼리) | 동화 목록 | 내 동화 앨범 |
+| §9 | GET | `/api/v1/albums/{id}` | `childId` (쿼리) | **동화** 한 편 | 앨범에서 동화 읽기 |
+
+> **`/albums` 만 `/ai` 아래가 아니다.** `/api/v1/ai/*` 는 "추론 서버로 중계한다"는
+> 뜻이고, 앨범은 게이트웨이가 직접 가진 데이터라 이름이 뜻과 맞아야 한다.
+> 여기서는 게이트웨이가 body 를 열어 보고 응답도 직접 만든다.
 
 > `feedback`과 `pronunciation`은 성격이 다르다. 전자는 **어떤 단어를 골랐나**(텍스트),
 > 후자는 **어떻게 소리 냈나**(오디오)를 본다. 화면도 다르다.
@@ -613,7 +633,8 @@ GET /api/v1/ai/pronunciation/sentences
 하루치 플레이 기록 4장면을 받아 LLM이 동화로 엮어 돌려준다.
 
 **다른 엔드포인트와 다른 점**: "방금 한 행동"이 아니라 **"오늘 한 일 전부"** 를 한 번에 보낸다.
-그 기록을 모아두는 것은 **앱의 몫**이다 — 서버는 아무것도 저장하지 않는다(§0 무상태).
+그 기록을 모아두는 것은 **앱의 몫**이다 — 생성 요청 자체는 무상태다.
+만들어진 동화를 남기는 것은 별개의 **§9 앨범 API** 다.
 
 ### 요청 (application/json)
 
@@ -667,7 +688,7 @@ GET /api/v1/ai/pronunciation/sentences
 
 ### ⚠️ 앱이 알아둘 것
 
-- **타임아웃이 60초다.** 다른 엔드포인트(15초)보다 훨씬 길다. 4장면을 한 번에 생성하기 때문이다.
+- **타임아웃이 60초다.** 15초로 끝나는 `tts`·문장 목록보다 훨씬 길다(엔드포인트별 값은 §0.4 표). 4장면을 한 번에 생성하기 때문이다.
   **반드시 로딩 화면을 띄운다.** 실패해도 §0.4대로 `"괜찮아, 다시 해볼까?"` 로 폴백한다
 - **기록은 앱이 모은다.** 서버는 저장하지 않으므로, 하루를 진행하며 4장면을 앱이 쌓아뒀다가 한 번에 보낸다
 - **`childSaid`는 `null`이어도 된다.** 아이가 말을 고르지 않은 장면이 있을 수 있다
@@ -745,6 +766,114 @@ src/main/java/com/zooearly/
         └── InferenceClient.java         WebClient/RestClient. 타임아웃 §0.4
 ```
 
-- **DB 의존성이 없다.** JPA·데이터소스 설정을 넣지 않는다.
+- **중계 경로(`/api/v1/ai/*`)는 DB 를 쓰지 않는다.** JPA·데이터소스는 앨범(§9)만 쓰고,
+  중계와 섞지 않는다.
 - `AiRelayService`는 응답 body를 파싱하지 않고 통과시키는 것이 기본이다. 파싱하는 순간 FastAPI 응답 스키마가 바뀔 때마다 게이트웨이도 배포해야 한다.
 - multipart는 스트리밍으로 릴레이한다(메모리에 전부 올리지 않는다) — 10MB 오디오 동시 요청을 견디기 위함이다.
+
+---
+
+## 9. 동화 앨범 — `/api/v1/albums`
+
+> **여기만 `/ai` 아래가 아니다.** `/api/v1/ai/*` 는 추론 서버로 중계한다는 뜻이고,
+> 앨범은 게이트웨이가 직접 가진 데이터다. 그래서 여기서는 게이트웨이가 body 를
+> 열어 보고 응답도 직접 만든다.
+
+하루를 마치면 동화가 한 편 만들어진다. 그것을 남겼다가 **다음 날에도 다시 읽게** 한다.
+
+### 9.0 누구의 것인가 — `childId`
+
+로그인이 없다. 기기가 처음 켜질 때 만든 **UUIDv4** 하나로 묶는다.
+
+| | 닉네임 | `childId` |
+|---|---|---|
+| 겹치나 | **겹친다** — 같은 반에 "지우"가 둘이면 앨범이 섞인다 | 겹치지 않는다 |
+| 바뀌나 | **바뀐다** — 이름을 고치면 과거 앨범을 잃는다 | 바뀌지 않는다 |
+
+닉네임은 **그때 그 이름**을 표지에 띄우기 위한 표시용으로만 함께 저장한다.
+
+**인증이 없으므로 `childId` 가 곧 열쇠다.** 조회할 때도 반드시 함께 보낸다 —
+`id` 만으로 꺼낼 수 있게 두면 번호를 하나씩 올려보는 것만으로 남의 동화가 열린다.
+
+### 9.1 POST /api/v1/albums — 동화 남기기
+
+**앱은 동화를 화면에 띄운 뒤에 부른다.** 저장을 기다렸다 보여주면, 저장이 늦거나
+실패하는 날 아이가 동화를 아예 못 본다. 실패해도 화면을 막지 않는다.
+
+```jsonc
+{
+  "childId": "a355d4f5-f7ac-4b74-8733-b28236b270ac",  // 필수 · UUIDv4
+  "nickname": "지우",                                   // 필수 · 40자 이하
+  "title": "지우가 들려준 오늘",                          // 필수 · 120자 이하
+  "scenes": [                                          // 필수 · 1개 이상
+    {
+      "category": "school_arrival",   // 필수 · school_arrival|class|lunch|school_departure
+      "subtitle": "학교 오는 길",       // 필수 · 120자 이하
+      "opening": "아침에",             // 2000자 이하
+      "quote": "안녕! 우리 같이 놀자!",  // 500자 이하 · null 가능
+      "narration": "지우가 학교에 왔어요." // 필수 · 4000자 이하
+    }
+  ]
+}
+```
+
+**삽화는 보내지 않는다.** 앱 번들의 정적 그림이고 `category` 하나로 결정된다.
+
+```jsonc
+// 200
+{ "success": true, "data": { "id": 12 } }
+```
+
+| 에러 | 언제 |
+|---|---|
+| `400 INVALID_PARAMETER` · `field: childId` | UUID 형식이 아니거나, 한 아이가 500편을 넘겼다 |
+| `400 INVALID_PARAMETER` · `field: scenes[0].category` | 알 수 없는 장면 종류 |
+
+### 9.2 GET /api/v1/albums?childId={uuid} — 목록
+
+최신순. 표지를 그리는 데 필요한 것만 준다.
+
+```jsonc
+{
+  "success": true,
+  "data": [
+    {
+      "id": 12,
+      "title": "지우가 들려준 오늘",
+      "nickname": "지우",
+      "createdAt": "2026-08-27T01:10:51.313624Z",
+      "categories": ["school_arrival", "class", "lunch", "school_departure"]
+    }
+  ]
+}
+```
+
+`categories` 는 목록에서 **보석 줄**을 그리는 데 쓴다 — 글자를 아직 못 읽는 아이도
+색이 다른 보석 네 개를 보고 그날을 알아본다.
+
+### 9.3 GET /api/v1/albums/{id}?childId={uuid} — 한 편
+
+```jsonc
+{
+  "success": true,
+  "data": {
+    "id": 12,
+    "title": "지우가 들려준 오늘",
+    "nickname": "지우",            // 그때 그 이름. 지금 프로필과 다를 수 있다
+    "createdAt": "2026-08-27T01:10:51.313624Z",
+    "scenes": [ /* 9.1 과 같은 모양 */ ]
+  }
+}
+```
+
+| 에러 | 언제 |
+|---|---|
+| `404 NOT_FOUND` · `field: id` | 없거나, **`childId` 가 그 동화의 주인이 아니다** |
+| `400 INVALID_PARAMETER` · `field: childId` | UUID 형식이 아니다 |
+
+> 주인이 아닐 때 `403` 이 아니라 `404` 를 준다. `403` 은 "있긴 있다"를 알려주는 셈이라,
+> 번호를 훑어 남의 동화가 몇 편인지 셀 수 있다.
+
+### 9.4 저장 구조
+
+표는 하나다(`story_album`). 자세한 것은 [`zooearly-erd.md`](./zooearly-erd.md).

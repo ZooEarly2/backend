@@ -15,6 +15,31 @@ spring:
       max-file-size: 12MB
       max-request-size: 15MB
 
+  # ── 동화 앨범 (MySQL) ──────────────────────────────
+  #
+  # 릴레이(/api/v1/ai/*)는 여전히 무상태다. DB 를 쓰는 것은 앨범 하나뿐이고,
+  # 아이가 만든 동화를 남겼다가 다시 보여주는 데에만 쓴다.
+  #
+  # 로컬은 도커로 띄운 MySQL 을 기본값으로 둔다 — 값을 안 넣어도 개발이 굴러가야 한다.
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/zooearly?serverTimezone=UTC&characterEncoding=utf8}
+    username: ${DB_USERNAME:zooearly}
+    password: ${DB_PASSWORD:zooearly-local}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      # Container Apps 는 replica 를 늘려 처리량을 얻는다. replica 마다 풀을 크게 잡으면
+      # MySQL 쪽 연결 상한을 금세 먹는다 — 작게 두고 replica 로 늘린다.
+      maximum-pool-size: ${DB_POOL_SIZE:5}
+      connection-timeout: 5000
+  jpa:
+    hibernate:
+      # 표가 하나뿐이고 스키마를 손으로 관리할 이유가 없다. 지우지는 않는다(update).
+      ddl-auto: ${DB_DDL:update}
+    open-in-view: false          # 뷰가 없는 API 서버다. 켜두면 트랜잭션이 응답까지 끌려간다
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+
 springdoc:
   # 화면이 읽는 명세는 사람이 쓴 docs/zooearly-ai-openapi.yaml 이다.
   # 코드에서 자동 생성한 것을 쓰지 않는 이유: 컨트롤러가 body를 String으로 통과시키는

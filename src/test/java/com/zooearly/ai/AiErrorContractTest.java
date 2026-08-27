@@ -291,13 +291,13 @@ class AiErrorContractTest {
     @DisplayName("feedback: nickname은 body에 실려 그대로 통과한다")
     void feedbackPassesNicknameThrough() throws Exception {
         String body = "{\"targetSentence\":\"많이 주세요.\",\"recognizedText\":null,\"nickname\":\"민수\"}";
-        given(inferenceClient.postJson(anyString(), anyString())).willReturn("{\"success\":true}");
+        given(inferenceClient.postJsonFeedback(anyString(), anyString())).willReturn("{\"success\":true}");
 
         mvc.perform(post(FEEDBACK).contentType(MediaType.APPLICATION_JSON).content(body))
                 .andExpect(status().isOk());
 
         // body는 가공 없이 통과한다 — §0.1 릴레이 계약
-        verify(inferenceClient).postJson(anyString(), eq(body));
+        verify(inferenceClient).postJsonFeedback(anyString(), eq(body));
     }
 
     // ── tts language (선택 필드) — 명세 §4 ─────────────────────

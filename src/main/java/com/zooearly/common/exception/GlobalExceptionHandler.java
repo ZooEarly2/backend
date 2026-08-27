@@ -10,6 +10,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
+import org.springframework.validation.FieldError;
+import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
@@ -68,6 +70,28 @@ public class GlobalExceptionHandler {
         String field = e instanceof MissingServletRequestPartException p
                 ? p.getRequestPartName()
                 : ((MissingServletRequestParameterException) e).getParameterName();
+        return ResponseEntity.status(ErrorCode.INVALID_PARAMETER.status())
+                .body(ApiResponse.error(ErrorCode.INVALID_PARAMETER, field));
+    }
+
+    /**
+     * {@code @Valid} 검증 실패 → INVALID_PARAMETER(400).
+     *
+     * 앨범 API 가 들어오면서 처음 필요해졌다 — 중계 경로는 손으로 검증하지만
+     * 앨범은 게이트웨이 자기 계약이라 Bean Validation 을 쓴다. 이 핸들러가 없으면
+     * 아래 Exception 핸들러가 삼켜 500 이 나가고, 앱은 "서버가 죽었다"로 읽어
+     * 쓸데없이 재시도한다.
+     *
+     * <b>어느 필드가 잘못됐는지 함께 알려준다.</b> 실패한 것이 여럿이면 첫 번째만
+     * 짚는다 — 앱 화면이 한 번에 하나만 보여줄 수 있고, 목록을 줘도 쓰지 못한다.
+     */
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<ApiResponse<Void>> handleValidation(MethodArgumentNotValidException e) {
+        String field = e.getBindingResult().getFieldErrors().stream()
+                .findFirst()
+                .map(FieldError::getField)
+                .orElse(null);
+        log.warn("validation failed: {}", e.getMessage());
         return ResponseEntity.status(ErrorCode.INVALID_PARAMETER.status())
                 .body(ApiResponse.error(ErrorCode.INVALID_PARAMETER, field));
     }

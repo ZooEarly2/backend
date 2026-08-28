@@ -61,6 +61,41 @@ class AlbumApiTest {
     }
 
     @Test
+    @DisplayName("수업시간의 과목이 앨범에 남는다 — 삽화가 이 값으로 갈린다")
+    void keepsClassSubject() throws Exception {
+        String json =
+                """
+                {
+                  "childId": "%s",
+                  "nickname": "지우",
+                  "title": "수학을 한 날",
+                  "scenes": [
+                    {"category":"class","classSubject":"MATH","subtitle":"수학 시간",
+                     "opening":"교실에서","quote":null,"narration":"사과 세 개를 세었어요."}
+                  ]
+                }
+                """
+                        .formatted(CHILD_A);
+        String saved = mvc.perform(post("/api/v1/albums").contentType(MediaType.APPLICATION_JSON).content(json))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        long id = mapper.readTree(saved).path("data").path("id").asLong();
+
+        String read = mvc.perform(get("/api/v1/albums/" + id).param("childId", CHILD_A))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+        JsonNode scene = mapper.readTree(read).path("data").path("scenes").get(0);
+
+        // 이 값이 빠지면 앱이 과일을 센 아이에게 "동시 읽어보기" 그림을 보여준다.
+        // 방금 만든 동화는 맞게 나와도 앨범에서 다시 꺼내면 틀린다 — 그 자리를 막는다.
+        assert scene.path("classSubject").asText().equals("MATH") : read;
+    }
+
+    @Test
     @DisplayName("남긴 동화가 그대로 다시 나온다 — 화면을 재현할 수 있어야 한다")
     void savesAndReadsBack() throws Exception {
         long id = save(CHILD_A, "지우의 하루");

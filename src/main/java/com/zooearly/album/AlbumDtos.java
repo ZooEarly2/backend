@@ -34,9 +34,9 @@ public final class AlbumDtos {
     /**
      * 장면 하나.
      *
-     * 삽화는 담지 않는다 — 앱 번들의 정적 그림이고 {@code category} 하나로 결정된다.
-     * 그림 바이트를 저장하면 동화마다 같은 파일을 복제하면서, 나중에 그림을 고쳐도
-     * 옛 앨범만 낡은 그림으로 남는다.
+     * 삽화는 담지 않는다 — 앱 번들의 정적 그림이고 {@code category} 와
+     * {@code classSubject} 로 결정된다. 그림 바이트를 저장하면 동화마다 같은 파일을
+     * 복제하면서, 나중에 그림을 고쳐도 옛 앨범만 낡은 그림으로 남는다.
      */
     public record Scene(
             @NotBlank @Pattern(
@@ -46,7 +46,21 @@ public final class AlbumDtos {
             @NotBlank @Size(max = 120) String subtitle,
             @Size(max = 2000) String opening,
             @Size(max = 500) String quote,
-            @NotBlank @Size(max = 4000) String narration) {}
+            @NotBlank @Size(max = 4000) String narration,
+            /**
+             * 수업시간의 과목. 수업 장면이 아니면 {@code null} 이다.
+             *
+             * <p><b>삽화가 이 값으로 갈린다.</b> 그림 안에 "국어시간 · 동시 읽어보기" 가
+             * 글자로 그려져 있어서, 없으면 과일을 센 아이가 동시를 읽은 그림을 받는다.
+             *
+             * <p>여기 담지 않으면 앨범에 저장될 때 값이 버려져서, 방금 만든 동화는
+             * 맞게 나와도 <b>나중에 다시 꺼내 보면 또 국어 그림</b>이 된다.
+             *
+             * <p>옛 앨범에는 이 값이 없다({@code null}). 그때는 수업시간이 동시 읽기
+             * 하나뿐이었으므로 앱이 국어로 보는 것이 사실에 맞는다.
+             */
+            @Pattern(regexp = "KOREAN|MATH", message = "알 수 없는 과목입니다.")
+                    String classSubject) {}
 
     /** 목록에 쓰는 요약. 표지를 그리는 데 필요한 만큼만 담는다. */
     public record Summary(long id, String title, String nickname, String createdAt, List<String> categories) {}
